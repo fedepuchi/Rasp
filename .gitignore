@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Configuracion local del despliegue: cada Pi tiene la suya (IP del backend,
+# device_id, limites de alarma). Se genera con --save-config.
+config.json
+*.local.json
+
+# Datos capturados en las pruebas
+*.jsonl
+capturas/
+*.log
+
+# Editores y sistema
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

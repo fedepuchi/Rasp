@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Monitor de signos vitales
+Comment=Arranca el monitor al iniciar el escritorio
+Exec=/home/pi/monitor_vital/.venv/bin/python /home/pi/monitor_vital/main.py
+Path=/home/pi/monitor_vital
+Terminal=false
+X-GNOME-Autostart-enabled=true

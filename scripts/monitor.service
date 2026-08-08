@@ -1,0 +1,38 @@
+# Arranque automatico sin escritorio: SDL dibuja directo sobre KMS/DRM.
+#
+#   sudo cp scripts/monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now monitor
+#
+# Ajusta User, WorkingDirectory y la ruta del venv si no usas el usuario "pi".
+
+[Unit]
+Description=Monitor de signos vitales
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+# Grupos que hacen falta para dibujar en la consola y hablar con I2C/GPIO
+SupplementaryGroups=video render i2c gpio
+
+WorkingDirectory=/home/pi/monitor_vital
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=SDL_AUDIODRIVER=alsa
+Environment=PYTHONUNBUFFERED=1
+# Configuracion del despliegue (pisa lo que dice config.py)
+Environment=MONITOR_BACKEND_URL=http://192.168.0.100:8000
+Environment=MONITOR_DEVICE_ID=cama-1
+
+ExecStart=/home/pi/monitor_vital/.venv/bin/python main.py
+
+Restart=always
+RestartSec=5
+# Si falla 10 veces seguidas en 5 minutos, deja de intentar (algo esta mal de verdad)
+StartLimitBurst=10
+StartLimitIntervalSec=300
+
+[Install]
+WantedBy=multi-user.target

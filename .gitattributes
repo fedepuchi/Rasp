@@ -1,0 +1,9 @@
+# Este proyecto se edita en Windows pero corre en Linux (Raspberry Pi).
+# Los archivos de texto se guardan con LF en el repositorio, asi el Pi los
+# recibe con finales de linea de Unix pase lo que pase.
+* text=auto eol=lf
+
+# Binarios: que git no los toque
+*.png binary
+*.jpg binary
+*.ico binary

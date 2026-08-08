@@ -1,0 +1,14 @@
+# --- necesarias siempre ---
+pygame>=2.5
+
+# --- solo en el Raspberry Pi (I2C y GPIO) ---
+# En Windows/Mac no se instalan, y el codigo funciona igual en modo --demo.
+smbus2>=0.4 ; platform_system == "Linux"
+gpiozero>=2.0 ; platform_system == "Linux"
+# Backend de gpiozero que anda tanto en Pi 4 como en Pi 5 (RPi.GPIO no sirve en Pi 5)
+lgpio>=0.2 ; platform_system == "Linux"
+
+# --- opcional pero recomendada ---
+# Sin requests el envio usa urllib de la libreria estandar, que abre una
+# conexion nueva por POST. Con requests se reutiliza la conexion.
+requests>=2.28
