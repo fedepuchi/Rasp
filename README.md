@@ -12,6 +12,9 @@ En pantalla **solo aparece lo que estos tres modulos pueden medir**. Cada caja
 del panel numerico lleva escrito de que sensor sale, y lo que es una estimacion
 esta rotulado como tal.
 
+Por defecto los sensores arrancan **apagados**: se aprieta `X`, se encienden y
+se mide 10 segundos. Ver [Medicion a demanda](#medicion-a-demanda).
+
 ![Pantalla del monitor](docs/pantalla-normal.png)
 
 ![Con alarma activa](docs/pantalla-alarma.png)
@@ -171,6 +174,7 @@ python main.py --captura pantalla.png             # guarda una imagen y sale
 
 | Tecla | Que hace |
 |---|---|
+| `X` | **arranca una medicion** (o la cancela si esta corriendo) |
 | `ESC` / `Q` | salir |
 | `M` | silenciar alarmas 2 minutos |
 | `S` | sonido on/off |
@@ -180,6 +184,75 @@ python main.py --captura pantalla.png             # guarda una imagen y sale
 | `D` | panel de debug |
 | `F` | alternar pantalla completa |
 | `F1`..`F6` | controles del modo demo |
+
+---
+
+## Medicion a demanda
+
+Los sensores no miden todo el tiempo. Arrancan apagados y se despiertan con una
+tecla:
+
+```
+ESPERA  --X-->  ESTABILIZANDO (3 s)  -->  MIDIENDO (10 s)  -->  RESULTADO
+   ^                                                               |
+   +------------------------------- X -----------------------------+
+```
+
+![Pantalla de espera](docs/pantalla-espera.png)
+
+![Resultado de la medicion](docs/pantalla-resultado.png)
+
+Que pasa en cada fase:
+
+| Fase | Modulos | Que se ve |
+|---|---|---|
+| **Espera** | MAX30102 en modo bajo consumo, ADS1115 en disparo unico | la tecla y el mensaje |
+| **Estabilizando** | encendidos, alimentando los filtros | cartel de estabilizacion, sin trazas |
+| **Midiendo** | encendidos y grabando | ondas, numeros y cuenta regresiva |
+| **Resultado** | apagados otra vez | promedio, minimo y maximo de cada signo |
+
+### Por que hay una fase de estabilizacion
+
+Los pasa-altos de 0.5 Hz del ECG y del pletismografo arrancan con un transitorio
+que tapa la senial durante los primeros segundos. Si la ventana empezara en el
+instante cero, esos segundos irian a la basura y los "10 segundos de medicion"
+serian mentira. Con la espera previa, **los 10 segundos son 10 segundos utiles**:
+lo que se dibuja en pantalla y lo que se manda al backend es exactamente la
+ventana medida, ni una muestra mas.
+
+### La respiracion no entra en 10 segundos
+
+`RESP` va a decir **"sin dato en esta ventana"**, y no es un error. El filtro de
+0.1 Hz necesita unos 12 segundos solo para asentarse, y despues hacen falta 3
+ciclos respiratorios para tener un periodo confiable: en total 25 a 30
+segundos. Con la ventana en 10 s no llega, y es preferible que lo diga a que
+invente un numero.
+
+Si queres el numero de respiracion, subi la ventana:
+
+```bash
+python main.py --duracion 40
+```
+
+### Ajustes
+
+| Opcion | Que hace |
+|---|---|
+| `--duracion 30` | segundos de cada medicion |
+| `--continuo` | modo monitor de cama: mide siempre, sin tecla |
+| `--medir-al-inicio` | dispara una medicion al arrancar (util para un kiosco) |
+| `session.key` | que tecla dispara (default `x`) |
+| `session.warmup_s` | segundos de estabilizacion (default 3) |
+| `session.result_hold_s` | segundos que queda el resultado; `0` = hasta que aprietes la tecla |
+| `session.power_down_idle` | `false` deja los modulos encendidos entre mediciones |
+
+Apagar los modulos entre mediciones no es solo consumo: el MAX30102 con los LED
+encendidos se entibia, y si queda prendido con el dedo puesto un rato largo, esa
+temperatura termina en la lectura.
+
+Cada medicion terminada se manda al backend como un mensaje `measurement` con
+el resumen completo. Es el mensaje mas comodo para armar historial: una fila
+por medicion en vez de un caudal continuo.
 
 ---
 

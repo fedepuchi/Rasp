@@ -159,6 +159,12 @@ class AlarmManager:
             if code not in codes:
                 self.active.pop(code, None)
 
+    def clear(self) -> None:
+        """Apaga todo. Se usa entre mediciones: sin sensores leyendo no hay
+        nada que alarmar, y dejar la ultima alarma prendida seria enganioso."""
+        self.active.clear()
+        self._pending.clear()
+
     # -- consulta ----------------------------------------------------------
 
     def sorted_alarms(self) -> list[Alarm]:

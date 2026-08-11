@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 
 from config import Config
-from .ecg_ads1115 import ADS1115, AdsError, LeadsOffDetector
+from .ecg_ads1115 import ADS1115, AdsError, AnalogFrontendPower, LeadsOffDetector
 from .max30102 import MAX30102, Max30102Error
 from .simulator import EcgSimulator, PpgSimulator
 
@@ -41,17 +41,33 @@ class PpgChunk:
 
 
 class _PacedThread(threading.Thread):
-    """Hilo con temporizacion por reloj monotonico (sin deriva acumulada)."""
+    """Hilo con temporizacion por reloj monotonico (sin deriva acumulada).
+
+    Se puede pausar sin matarlo: cuando `active` esta bajo, el hilo no toca el
+    bus I2C y se queda esperando. Asi el arranque de una medicion es inmediato,
+    sin el costo de crear hilos nuevos cada vez.
+    """
 
     def __init__(self, name: str, period_s: float):
         super().__init__(name=name, daemon=True)
         self.period = period_s
         self._stop = threading.Event()
+        self.active = threading.Event()
         self.error: str | None = None
         self.overruns = 0
 
     def stop(self) -> None:
         self._stop.set()
+        self.active.set()  # que despierte para poder salir
+
+    def _wait_until_active(self) -> bool:
+        """True si hay que volver a arrancar el temporizador."""
+        if self.active.is_set():
+            return False
+        while not self.active.wait(timeout=0.1):
+            if self._stop.is_set():
+                return True
+        return True
 
     def _sleep_until(self, target: float) -> None:
         remaining = target - time.monotonic()
@@ -73,6 +89,7 @@ class EcgThread(_PacedThread):
         self.block_size = max(1, int(round(fs * 0.02)))
         self._adc: ADS1115 | None = None
         self._leads: LeadsOffDetector | None = None
+        self._sdn: AnalogFrontendPower | None = None
         self._sim: EcgSimulator | None = None
         self.leads_off_supported = False
         self.force_leads_off = False  # solo para el modo demo
@@ -92,6 +109,19 @@ class EcgThread(_PacedThread):
             self.cfg.ecg.lo_plus_pin, self.cfg.ecg.lo_minus_pin
         )
         self.leads_off_supported = self._leads.available
+        self._sdn = AnalogFrontendPower(self.cfg.ecg.sdn_pin)
+
+    def power_on(self) -> None:
+        if self._sdn is not None:
+            self._sdn.on()
+        if self._adc is not None:
+            self._adc.wake()
+
+    def power_off(self) -> None:
+        if self._adc is not None:
+            self._adc.sleep()
+        if self._sdn is not None:
+            self._sdn.off()
 
     def run(self) -> None:
         next_t = time.monotonic()
@@ -101,6 +131,13 @@ class EcgThread(_PacedThread):
         leads_check_at = 0.0
 
         while not self._stop.is_set():
+            if self._wait_until_active():
+                # Volvemos de una pausa: reiniciamos el reloj y el bloque a
+                # medio armar, que ya no es contiguo con lo que viene.
+                next_t = time.monotonic()
+                buf = []
+                continue
+
             next_t += self.period
             try:
                 if self._sim is not None:
@@ -140,6 +177,8 @@ class EcgThread(_PacedThread):
             self._adc.close()
         if self._leads is not None:
             self._leads.close()
+        if self._sdn is not None:
+            self._sdn.close()
 
 
 class PpgThread(_PacedThread):
@@ -171,12 +210,25 @@ class PpgThread(_PacedThread):
         )
         self.fs = self._sensor.output_rate_hz
 
+    def power_on(self) -> None:
+        if self._sensor is not None:
+            self._sensor.wake()
+
+    def power_off(self) -> None:
+        if self._sensor is not None:
+            self._sensor.shutdown()
+
     def run(self) -> None:
         next_t = time.monotonic()
         temp_at = 0.0
         pending = 0.0  # muestras fraccionarias acumuladas en modo demo
 
         while not self._stop.is_set():
+            if self._wait_until_active():
+                next_t = time.monotonic()
+                pending = 0.0
+                continue
+
             next_t += self.period
             try:
                 if self._sim is not None:
@@ -237,6 +289,47 @@ class AcquisitionManager:
             self.ppg_ready = True
         except (Max30102Error, OSError) as exc:
             self.errors.append(f"SpO2 no disponible: {exc}")
+
+        # En modo continuo los sensores quedan midiendo desde el arranque; en
+        # modo manual esperan a que alguien apriete la tecla.
+        if self.cfg.session.manual:
+            self.stop_reading()
+        else:
+            self.start_reading()
+
+    # -- encendido y apagado de los modulos --------------------------------
+
+    @property
+    def reading(self) -> bool:
+        return self.ecg.active.is_set() or self.ppg.active.is_set()
+
+    def start_reading(self) -> None:
+        """Enciende los modulos y deja que los hilos vuelvan a leer."""
+        for thread in (self.ecg, self.ppg):
+            try:
+                thread.power_on()
+            except OSError as exc:
+                self.errors.append(f"no se pudo encender {thread.name}: {exc}")
+        self._drain_queues()
+        self.ecg.active.set()
+        self.ppg.active.set()
+
+    def stop_reading(self) -> None:
+        """Pausa los hilos y apaga los modulos si la config lo pide."""
+        self.ecg.active.clear()
+        self.ppg.active.clear()
+        if self.cfg.session.power_down_idle:
+            for thread in (self.ecg, self.ppg):
+                try:
+                    thread.power_off()
+                except OSError:
+                    pass
+        self._drain_queues()
+
+    def _drain_queues(self) -> None:
+        """Tira lo que quedo en vuelo: no pertenece a la medicion que arranca."""
+        self.drain_ecg()
+        self.drain_ppg()
 
     def drain_ecg(self) -> list[EcgChunk]:
         out: list[EcgChunk] = []

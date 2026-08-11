@@ -48,6 +48,10 @@ class EcgConfig:
     # Deteccion de electrodo suelto (LO+ / LO-). None = deshabilitado.
     lo_plus_pin: int | None = 17
     lo_minus_pin: int | None = 27
+    # Pin SDN del AD8232 (apagado por hardware). None = no cableado; en ese caso
+    # el frente analogico queda encendido y solo se apaga el ADS1115.
+    # En bajo apaga el modulo, en alto lo enciende.
+    sdn_pin: int | None = None
     # Filtrado
     highpass_hz: float = 0.5
     lowpass_hz: float = 40.0
@@ -123,6 +127,26 @@ class BackendConfig:
 
 
 @dataclass
+class SessionConfig:
+    """Medicion a demanda: los sensores arrancan apagados y se encienden con una tecla."""
+
+    # False = modo continuo (los sensores miden siempre, como un monitor de cama)
+    manual: bool = True
+    key: str = "x"  # tecla que dispara la medicion
+    # Segundos de lectura efectiva
+    duration_s: float = 10.0
+    # Los filtros pasa-altos necesitan asentarse antes de que las cuentas sirvan.
+    # Sin esto, los primeros segundos de la ventana se van en el transitorio.
+    warmup_s: float = 3.0
+    # Cuanto queda el resumen en pantalla antes de volver a la espera.
+    # 0 = para siempre, hasta que se apriete la tecla otra vez.
+    result_hold_s: float = 0.0
+    # Apagar los sensores mientras no se mide (menos consumo y menos calor en
+    # el MAX30102, que si queda encendido con el dedo puesto se entibia).
+    power_down_idle: bool = True
+
+
+@dataclass
 class DeviceConfig:
     device_id: str = field(default_factory=lambda: f"rpi-{socket.gethostname()}")
     patient_id: str = "ANON-001"
@@ -169,6 +193,7 @@ class UiConfig:
 @dataclass
 class Config:
     device: DeviceConfig = field(default_factory=DeviceConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
     ecg: EcgConfig = field(default_factory=EcgConfig)
     ppg: PpgConfig = field(default_factory=PpgConfig)
     resp: RespConfig = field(default_factory=RespConfig)

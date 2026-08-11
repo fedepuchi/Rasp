@@ -23,9 +23,10 @@ except ImportError:  # pragma: no cover
     SMBus = None
 
 try:
-    from gpiozero import DigitalInputDevice
+    from gpiozero import DigitalInputDevice, DigitalOutputDevice
 except ImportError:  # pragma: no cover
     DigitalInputDevice = None
+    DigitalOutputDevice = None
 
 
 REG_CONVERSION = 0x00
@@ -111,6 +112,24 @@ class ADS1115:
     def read_volts(self) -> float:
         return self.read_counts() * self.volts_per_count
 
+    def sleep(self) -> None:
+        """Pasa a disparo unico: el ADS1115 se apaga solo entre conversiones.
+
+        Como no lo vamos a disparar, se queda en bajo consumo indefinidamente.
+        """
+        config = self._config | (1 << 8)  # MODE = single-shot
+        try:
+            self._bus.write_i2c_block_data(
+                self.address, REG_CONFIG,
+                [(config >> 8) & 0xFF, config & 0xFF],
+            )
+        except OSError:
+            pass
+
+    def wake(self) -> None:
+        """Vuelve a conversion continua."""
+        self._start()
+
     def close(self) -> None:
         try:
             self._bus.close()
@@ -152,3 +171,34 @@ class LeadsOffDetector:
                     pin.close()
             except Exception:
                 pass
+
+
+class AnalogFrontendPower:
+    """Pin SDN del AD8232, si esta cableado. Si no, no hace nada."""
+
+    def __init__(self, sdn_pin: int | None) -> None:
+        self._pin = None
+        self.available = False
+        if sdn_pin is None or DigitalOutputDevice is None:
+            return
+        try:
+            # initial_value=False: arranca apagado, se enciende al medir
+            self._pin = DigitalOutputDevice(sdn_pin, initial_value=False)
+            self.available = True
+        except Exception as exc:
+            print(f"[ecg] no se pudo abrir SDN: {exc}")
+
+    def on(self) -> None:
+        if self._pin is not None:
+            self._pin.on()
+
+    def off(self) -> None:
+        if self._pin is not None:
+            self._pin.off()
+
+    def close(self) -> None:
+        try:
+            if self._pin is not None:
+                self._pin.close()
+        except Exception:
+            pass

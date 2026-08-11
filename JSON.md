@@ -65,7 +65,7 @@ Cada POST manda varios mensajes juntos para no abrir una conexion por dato:
 | campo | tipo | que es |
 |---|---|---|
 | `schema` | string | `"monitor.v1"` |
-| `type` | string | `session_start` \| `vitals` \| `waveform` \| `event` \| `session_end` |
+| `type` | string | `session_start` \| `vitals` \| `waveform` \| `measurement` \| `event` \| `session_end` |
 | `device_id`, `session_id` | string | idem sobre |
 | `seq` | int | contador que arranca en 1 y no se repite dentro de una sesion |
 | `ts` | string | ISO-8601 UTC con milisegundos, momento en que se armo el mensaje |
@@ -327,7 +327,65 @@ sobra, `backend.ecg_send_decimation: 2` manda el ECG a la mitad de muestras.
 
 ---
 
-## 5. `event` y `session_end`
+## 5. `measurement` — al terminar cada medicion
+
+Por defecto el equipo no mide continuamente: se aprieta una tecla, mide 10
+segundos y se apaga. Al cerrar cada ventana manda el resumen. **Este es el
+mensaje mas comodo para armar historial**: una fila por medicion, en vez de
+tener que agregar miles de `vitals`.
+
+```json
+{
+  "schema": "monitor.v1",
+  "type": "measurement",
+  "seq": 51,
+  "ts": "2026-08-05T05:45:43.900Z",
+  "index": 1,
+  "patient": { "id": "ANON-001", "name": "PACIENTE DE PRUEBA", "bed": "CAMA 1" },
+  "summary": {
+    "started_at_ms": 1786427133884,
+    "duration_s": 10.01,
+    "aborted": false,
+    "usable": true,
+    "beats_detected": 12,
+    "hr_bpm":            { "unit": "lpm", "n": 26, "mean": 72,   "min": 72,   "max": 73 },
+    "pr_bpm":            { "unit": "lpm", "n": 28, "mean": 71,   "min": 71,   "max": 72 },
+    "spo2_pct":          { "unit": "%",   "n": 28, "mean": 98.0, "min": 98.0, "max": 98.2 },
+    "perfusion_index":   { "unit": "%",   "n": 28, "mean": 1.99, "min": 1.83, "max": 2.13 },
+    "resp_rpm_estimated":{ "unit": "rpm", "n": 0,  "mean": null, "min": null, "max": null },
+    "quality": {
+      "ecg_ok_fraction": 1.0,
+      "ppg_ok_fraction": 1.0,
+      "problems": []
+    }
+  }
+}
+```
+
+| campo | que es |
+|---|---|
+| `index` | numero de medicion dentro de la sesion, arranca en 1 |
+| `duration_s` | duracion real de la ventana |
+| `aborted` | `true` si alguien la corto a mitad de camino |
+| `usable` | al menos una de las dos vias dio algo confiable |
+| `beats_detected` | ondas R detectadas en la ventana |
+| `n` (en cada signo) | cuantas muestras entraron al promedio. **`n: 0` significa que ese signo no se pudo medir** |
+| `quality.*_ok_fraction` | fraccion de la ventana con senial valida (0 a 1) |
+| `quality.problems` | lista en castellano de lo que salio mal |
+
+> **`resp_rpm_estimated` con `n: 0` es lo normal en una ventana de 10 segundos.**
+> El filtro de 0.1 Hz tarda ~12 s en asentarse y despues hacen falta 3 ciclos
+> respiratorios: en total 25 a 30 segundos. Con `session.duration_s` en 40
+> aparece. Guardalo como `null`, no como cero.
+
+Durante la medicion tambien salen los `vitals` y `waveform` de siempre, y solo
+durante la medicion: entre una y otra el equipo no manda nada, porque no hay
+nada que mandar. Los bloques de onda cubren exactamente la ventana medida, sin
+la fase de estabilizacion.
+
+---
+
+## 6. `event` y `session_end`
 
 ```json
 { "type": "event", "event": "limites_cambiados", "detail": { "hr_high": 130 } }
@@ -340,7 +398,7 @@ deberia dar por cerrada una sesion que no manda nada por, digamos, 30 segundos.
 
 ---
 
-## 6. Que pasa si el backend se cae
+## 7. Que pasa si el backend se cae
 
 1. El POST falla y el lote **no se descarta**: queda en una cola en RAM.
 2. Se reintenta con backoff exponencial: 0.5 s, 1 s, 2 s... hasta 15 s.
@@ -354,7 +412,7 @@ Nada de esto bloquea el dibujado: la red corre en su propio hilo.
 
 ---
 
-## 7. Un backend minimo, para probar
+## 8. Un backend minimo, para probar
 
 **FastAPI** (Python):
 

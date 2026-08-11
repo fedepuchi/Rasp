@@ -269,6 +269,24 @@ class Publisher:
         self._emit(self._envelope("session_end", {"reason": reason}), urgent=True)
         self._flush_pending()
 
+    def measurement(self, summary, index: int) -> None:
+        """Resumen de una medicion a demanda. Se manda apenas termina.
+
+        Es el mensaje mas util del contrato para guardar historial: una fila
+        por medicion, en vez de un caudal continuo de vitals.
+        """
+        if not self.cfg.enabled:
+            return
+        self._emit(self._envelope("measurement", {
+            "patient": {
+                "id": self.device.patient_id,
+                "name": self.device.patient_name,
+                "bed": self.device.bed,
+            },
+            "index": index,
+            "summary": summary.to_json(),
+        }), urgent=True)
+
     def event(self, name: str, detail: dict | None = None) -> None:
         """Evento suelto (por ejemplo: se cambiaron los limites de alarma)."""
         if not self.cfg.enabled:

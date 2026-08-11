@@ -32,9 +32,14 @@ from config import Config
 from net import Publisher
 from processing import EcgProcessor, PpgProcessor
 from sensors import AcquisitionManager
+from session import MeasurementSession
 from state import VitalsSnapshot
 from ui import MonitorUI
 from ui.sound import SoundEngine
+
+
+def _fmt(value: float | None, decimals: int) -> str:
+    return "---" if value is None else f"{value:.{decimals}f}"
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +56,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-backend", action="store_true",
                         help="no manda nada por red")
     parser.add_argument("--no-sound", action="store_true")
+    parser.add_argument("--continuo", action="store_true",
+                        help="mide siempre, sin esperar la tecla")
+    parser.add_argument("--duracion", type=float, metavar="SEG",
+                        help="segundos de cada medicion (default 10)")
+    parser.add_argument("--medir-al-inicio", action="store_true",
+                        help="dispara una medicion apenas arranca, sin esperar la tecla")
     parser.add_argument("--notch", type=float, metavar="HZ",
                         help="frecuencia de red para el notch (50 o 60)")
     parser.add_argument("--captura", metavar="ARCHIVO.png",
@@ -75,6 +86,10 @@ def build_config(args: argparse.Namespace) -> Config:
         cfg.ui.sound_enabled = False
     if args.notch:
         cfg.ecg.notch_hz = args.notch
+    if args.continuo:
+        cfg.session.manual = False
+    if args.duracion:
+        cfg.session.duration_s = args.duracion
     return cfg
 
 
@@ -106,26 +121,38 @@ def main() -> int:
     # Es una conversion nominal: la ganancia real del modulo no esta calibrada.
     counts_to_mv = volts_per_count * 1000.0 / cfg.ecg.frontend_gain
 
-    ecg_proc = EcgProcessor(
-        fs=ecg_fs,
-        highpass_hz=cfg.ecg.highpass_hz,
-        lowpass_hz=cfg.ecg.lowpass_hz,
-        notch_hz=cfg.ecg.notch_hz,
-        notch_q=cfg.ecg.notch_q,
-        counts_to_mv=counts_to_mv,
-        volts_per_count=volts_per_count,
-        supply_volts=cfg.ecg.supply_volts,
-    )
-    ppg_proc = PpgProcessor(
-        fs=ppg_fs,
-        highpass_hz=cfg.ppg.highpass_hz,
-        lowpass_hz=cfg.ppg.lowpass_hz,
-        spo2_window_s=cfg.ppg.spo2_window_s,
-        finger_threshold=cfg.ppg.finger_threshold,
-        resp_fs=cfg.resp.fs_hz,
-        resp_low_hz=cfg.resp.highpass_hz,
-        resp_high_hz=cfg.resp.lowpass_hz,
-    )
+    def make_processors():
+        """Procesadores nuevos y limpios.
+
+        Se recrean en cada medicion en vez de resetearlos campo por campo:
+        entre los filtros, los detectores y los buffers hay decenas de
+        variables de estado, y olvidarse una sola arrastra el latido anterior
+        a la medicion siguiente.
+        """
+        return (
+            EcgProcessor(
+                fs=ecg_fs,
+                highpass_hz=cfg.ecg.highpass_hz,
+                lowpass_hz=cfg.ecg.lowpass_hz,
+                notch_hz=cfg.ecg.notch_hz,
+                notch_q=cfg.ecg.notch_q,
+                counts_to_mv=counts_to_mv,
+                volts_per_count=volts_per_count,
+                supply_volts=cfg.ecg.supply_volts,
+            ),
+            PpgProcessor(
+                fs=ppg_fs,
+                highpass_hz=cfg.ppg.highpass_hz,
+                lowpass_hz=cfg.ppg.lowpass_hz,
+                spo2_window_s=cfg.ppg.spo2_window_s,
+                finger_threshold=cfg.ppg.finger_threshold,
+                resp_fs=cfg.resp.fs_hz,
+                resp_low_hz=cfg.resp.highpass_hz,
+                resp_high_hz=cfg.resp.lowpass_hz,
+            ),
+        )
+
+    ecg_proc, ppg_proc = make_processors()
 
     # -- red ---------------------------------------------------------------
     publisher = Publisher(cfg)
@@ -151,6 +178,44 @@ def main() -> int:
     else:
         print("[red] envio deshabilitado")
 
+    # -- medicion a demanda ------------------------------------------------
+    measurement = MeasurementSession(cfg, acquisition)
+    ui.session = measurement if cfg.session.manual else None
+
+    def on_measurement_start() -> None:
+        nonlocal ecg_proc, ppg_proc, snapshot, last_temp
+        ecg_proc, ppg_proc = make_processors()
+        snapshot = VitalsSnapshot()
+        last_temp = None
+        ui.clear_traces()
+        alarms.clear()
+
+    def on_measurement_finish(summary) -> None:
+        publisher.measurement(summary, measurement.measurements)
+        alarms.clear()
+        estado = "cancelada" if summary.aborted else "lista"
+        print(f"[medicion #{measurement.measurements}] {estado} - "
+              f"FC {_fmt(summary.hr.mean, 0)}  SpO2 {_fmt(summary.spo2.mean, 1)}  "
+              f"PR {_fmt(summary.pr.mean, 0)}  latidos {summary.beats}")
+        for problem in summary.problems:
+            print(f"    aviso: {problem}")
+
+    measurement.on_start = on_measurement_start
+    # Al abrir la ventana se limpian las trazas: asi lo que se ve en pantalla
+    # es exactamente lo que se esta midiendo, sin el transitorio previo.
+    measurement.on_window_start = ui.clear_traces
+    measurement.on_finish = on_measurement_finish
+
+    if cfg.session.manual:
+        print(f"[medicion] modo manual: apreta {cfg.session.key.upper()} para medir "
+              f"{cfg.session.duration_s:.0f} s "
+              f"(mas {cfg.session.warmup_s:.0f} s de estabilizacion)")
+    else:
+        print("[medicion] modo continuo")
+
+    if args.medir_al_inicio and cfg.session.manual:
+        measurement.start()
+
     started_at = time.time()
     snapshot = VitalsSnapshot()
     last_temp = None
@@ -158,68 +223,83 @@ def main() -> int:
 
     try:
         while ui.handle_events():
-            # ---- ECG ----
-            for chunk in acquisition.drain_ecg():
-                leads_off = chunk.lo_plus or chunk.lo_minus
-                ecg_proc.set_leads_off(leads_off)
-                ui.set_leads_off(leads_off)
-                snapshot.ecg_lo_plus = chunk.lo_plus
-                snapshot.ecg_lo_minus = chunk.lo_minus
-                snapshot.ecg_leads_off = leads_off
+            # Con los sensores apagados no hay nada que procesar: los numeros
+            # quedan congelados en lo ultimo que se midio.
+            acquiring = measurement.acquiring
+            # Durante la estabilizacion las muestras alimentan los filtros,
+            # pero no se dibujan ni se mandan al backend.
+            recording = measurement.recording
 
-                millivolts, beats = ecg_proc.process(chunk.values)
-                ui.push_ecg(millivolts)
-                publisher.add_samples("ecg", millivolts, chunk.t0)
-                for _ in range(beats):
-                    ui.on_beat(ppg_proc.spo2)
+            if acquiring:
+                # ---- ECG ----
+                for chunk in acquisition.drain_ecg():
+                    leads_off = chunk.lo_plus or chunk.lo_minus
+                    ecg_proc.set_leads_off(leads_off)
+                    ui.set_leads_off(leads_off)
+                    snapshot.ecg_lo_plus = chunk.lo_plus
+                    snapshot.ecg_lo_minus = chunk.lo_minus
+                    snapshot.ecg_leads_off = leads_off
 
-            # ---- PPG ----
-            for chunk in acquisition.drain_ppg():
-                pleth, resp, pulses = ppg_proc.process(chunk.red, chunk.ir)
-                ui.push_pleth(pleth)
-                ui.push_resp(resp)
-                publisher.add_samples("pleth", pleth, chunk.t0)
-                if resp:
-                    publisher.add_samples("resp", resp, chunk.t0)
-                if pulses:
-                    ui.on_pulse()
-                ui.set_finger_off(not ppg_proc.finger_detected)
+                    millivolts, beats = ecg_proc.process(chunk.values)
+                    if recording:
+                        ui.push_ecg(millivolts)
+                        publisher.add_samples("ecg", millivolts, chunk.t0)
+                        for _ in range(beats):
+                            ui.on_beat(ppg_proc.spo2)
+                            measurement.note_beat()
 
-            ecg_proc.tick()
-            ppg_proc.tick()
-            if acquisition.ppg.die_temp_c is not None:
-                last_temp = acquisition.ppg.die_temp_c
+                # ---- PPG ----
+                for chunk in acquisition.drain_ppg():
+                    pleth, resp, pulses = ppg_proc.process(chunk.red, chunk.ir)
+                    if recording:
+                        ui.push_pleth(pleth)
+                        ui.push_resp(resp)
+                        publisher.add_samples("pleth", pleth, chunk.t0)
+                        if resp:
+                            publisher.add_samples("resp", resp, chunk.t0)
+                        if pulses:
+                            ui.on_pulse()
+                    ui.set_finger_off(not ppg_proc.finger_detected)
 
-            # ---- estado ----
-            snapshot.hr_bpm = ecg_proc.hr_bpm
-            snapshot.pr_bpm = ppg_proc.pr_bpm
-            snapshot.spo2_pct = ppg_proc.spo2
-            snapshot.perfusion_index = ppg_proc.perfusion_index
-            snapshot.resp_rpm = ppg_proc.resp_rpm
-            snapshot.rr_last_ms = ecg_proc.last_rr_ms
-            snapshot.hrv_rmssd_ms = ecg_proc.rmssd_ms
-            snapshot.ecg_noise = ecg_proc.noise_level
-            snapshot.ecg_saturated = ecg_proc.saturated
-            snapshot.finger_detected = ppg_proc.finger_detected
-            # Diagnostico del equipo, no del paciente
-            snapshot.sensor_die_temp_c = last_temp
-            snapshot.ecg_baseline_v = ecg_proc.baseline_v
-            snapshot.ir_dc = ppg_proc.ir_dc_value or None
-            snapshot.red_dc = ppg_proc.red_dc_value or None
+                ecg_proc.tick()
+                ppg_proc.tick()
+                if acquisition.ppg.die_temp_c is not None:
+                    last_temp = acquisition.ppg.die_temp_c
+
+                # ---- signos vitales ----
+                snapshot.hr_bpm = ecg_proc.hr_bpm
+                snapshot.pr_bpm = ppg_proc.pr_bpm
+                snapshot.spo2_pct = ppg_proc.spo2
+                snapshot.perfusion_index = ppg_proc.perfusion_index
+                snapshot.resp_rpm = ppg_proc.resp_rpm
+                snapshot.rr_last_ms = ecg_proc.last_rr_ms
+                snapshot.hrv_rmssd_ms = ecg_proc.rmssd_ms
+                snapshot.ecg_noise = ecg_proc.noise_level
+                snapshot.ecg_saturated = ecg_proc.saturated
+                snapshot.finger_detected = ppg_proc.finger_detected
+                # Diagnostico del equipo, no del paciente
+                snapshot.sensor_die_temp_c = last_temp
+                snapshot.ecg_baseline_v = ecg_proc.baseline_v
+                snapshot.ir_dc = ppg_proc.ir_dc_value or None
+                snapshot.red_dc = ppg_proc.red_dc_value or None
+                snapshot.seconds_since_beat = ecg_proc.seconds_since_beat()
+                snapshot.ts = time.time()
+
+            # ---- estado del equipo, siempre ----
             snapshot.ecg_active = acquisition.ecg_ready
             snapshot.ppg_active = acquisition.ppg_ready
-            snapshot.seconds_since_beat = ecg_proc.seconds_since_beat()
             snapshot.backend_enabled = cfg.backend.enabled
             snapshot.backend_ok = publisher.status.connected
             snapshot.backend_pending = publisher.status.pending_batches
             snapshot.uptime_s = time.time() - started_at
-            snapshot.ts = time.time()
 
-            alarms.evaluate(snapshot)
-            if alarms.should_sound():
-                sound.alarm(alarms.highest_level)
+            if recording:
+                alarms.evaluate(snapshot)
+                if alarms.should_sound():
+                    sound.alarm(alarms.highest_level)
+                publisher.tick(snapshot, alarms)
 
-            publisher.tick(snapshot, alarms)
+            measurement.update(snapshot)
             ui.render(snapshot)
 
             if args.captura and snapshot.uptime_s >= args.segundos:

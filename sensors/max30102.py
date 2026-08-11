@@ -166,10 +166,23 @@ class MAX30102:
         self._write(REG_FIFO_RD_PTR, 0)
 
     def shutdown(self) -> None:
+        """Modo bajo consumo: apaga los LED y para el conversor.
+
+        Deja la configuracion intacta, asi despertar es solo volver a escribir
+        el modo. Con los LED apagados el chip no se entibia, que es lo que pasa
+        si se lo deja encendido con el dedo puesto un rato largo.
+        """
         try:
             self._write(REG_MODE_CONFIG, 0x80)
         except OSError:
             pass
+
+    def wake(self) -> None:
+        """Sale del modo bajo consumo y empieza a llenar la FIFO de cero."""
+        self._write(REG_MODE_CONFIG, MODE_SPO2)
+        self.clear_fifo()
+        # El primer par de muestras sale mientras los LED todavia estabilizan
+        time.sleep(0.02)
 
     def close(self) -> None:
         self.shutdown()
