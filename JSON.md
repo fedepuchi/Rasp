@@ -19,9 +19,10 @@ Hay dos casos de frontera que el JSON marca de forma explicita en vez de
 disimularlos:
 
 - **`resp_rpm_estimated`** — se estima a partir de como la respiracion mueve la
-  linea de base del pletismografo. Es una tecnica real y documentada, pero es
-  una **estimacion**, no una medicion. Por eso el campo lleva `_estimated` en
-  el nombre.
+  linea de base del pletismografo. **No hay sensor de respiracion en este
+  equipo.** Es una tecnica real y documentada, pero es una **estimacion**, no
+  una medicion, y por eso el campo lleva `_estimated` en el nombre. El detalle
+  esta en [docs/respiracion.md](docs/respiracion.md).
 - **`diagnostics.sensor_die_temp_c`** — es la temperatura del **chip**
   MAX30102, que el fabricante expone para compensar la deriva de los LED. No
   tiene nada que ver con la temperatura del paciente, y por eso vive en

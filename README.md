@@ -47,9 +47,12 @@ impedancia toracica o por flujo.
 Dos casos de frontera, marcados en la pantalla en vez de disimulados:
 
 - **RESP** sale de como la respiracion mueve la linea de base del
-  pletismografo. Es una tecnica real, pero es una **estimacion**: el numero va
-  con un `~` adelante y la caja dice ESTIMADA. Si preferis no mostrarlo,
-  `resp.enabled: false` en la configuracion lo saca junto con su carril.
+  pletismografo. **No hay ningun sensor de respiracion en este equipo**: es una
+  tecnica real, pero es una **estimacion**, y el numero va con un `~` adelante
+  y la caja dice ESTIMADA. Si preferis no mostrarlo, `resp.enabled: false` en la
+  configuracion lo saca junto con su carril.
+  Como funciona, que la ensucia y que habria que agregar para medirla de verdad:
+  **[docs/respiracion.md](docs/respiracion.md)**.
 - **La temperatura del MAX30102** es la de su propio chip, que el fabricante
   expone para compensar la deriva de los LED. No tiene nada que ver con la
   temperatura del paciente, asi que **no esta en el panel de signos vitales**:
@@ -233,6 +236,9 @@ Si queres el numero de respiracion, subi la ventana:
 ```bash
 python main.py --duracion 40
 ```
+
+La cuenta completa de por que hacen falta esos segundos esta en
+[docs/respiracion.md](docs/respiracion.md).
 
 ### Ajustes
 
