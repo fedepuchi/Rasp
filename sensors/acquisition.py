@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from config import Config
 from .ecg_ads1115 import ADS1115, AdsError, AnalogFrontendPower, LeadsOffDetector
-from .max30102 import MAX30102, Max30102Error
+from .max30102 import MAX30102, DataReadyPin, Max30102Error
 from .simulator import EcgSimulator, PpgSimulator
 
 
@@ -191,6 +191,7 @@ class PpgThread(_PacedThread):
         self.fs = cfg.ppg.sample_rate_hz / cfg.ppg.averaging
         self._sensor: MAX30102 | None = None
         self._sim: PpgSimulator | None = None
+        self._int: DataReadyPin | None = None
         self.die_temp_c: float | None = None
 
     def setup(self) -> None:
@@ -209,6 +210,13 @@ class PpgThread(_PacedThread):
             led_ir_current=self.cfg.ppg.led_ir_current,
         )
         self.fs = self._sensor.output_rate_hz
+        self._int = DataReadyPin(self.cfg.ppg.int_pin)
+
+    @property
+    def int_pulses(self) -> int:
+        """Cuantas veces aviso el INT. Si queda en 0 con el sensor encendido,
+        el pin no esta conectado o esta en otro GPIO."""
+        return self._int.pulses if self._int is not None else 0
 
     def power_on(self) -> None:
         if self._sensor is not None:
@@ -261,6 +269,8 @@ class PpgThread(_PacedThread):
     def close(self) -> None:
         if self._sensor is not None:
             self._sensor.close()
+        if self._int is not None:
+            self._int.close()
 
 
 class AcquisitionManager:

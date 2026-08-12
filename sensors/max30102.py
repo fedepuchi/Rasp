@@ -17,6 +17,11 @@ except ImportError:  # pragma: no cover - en la PC de desarrollo no esta
     SMBus = None
     i2c_msg = None
 
+try:
+    from gpiozero import DigitalInputDevice
+except ImportError:  # pragma: no cover
+    DigitalInputDevice = None
+
 
 # --- registros -------------------------------------------------------------
 REG_INTR_STATUS_1 = 0x00
@@ -55,6 +60,44 @@ BYTES_PER_SAMPLE = 6  # 3 bytes por LED, 2 LEDs en modo SpO2
 
 class Max30102Error(RuntimeError):
     pass
+
+
+class DataReadyPin:
+    """Pin INT del MAX30102, si esta cableado.
+
+    El driver NO lo necesita: vacia la FIFO por sondeo, que a 100 Hz sobra. Se
+    lee unicamente como senial de vida, para poder distinguir un sensor
+    apagado de uno que esta midiendo. El INT es de colector abierto y activo en
+    bajo: en reposo queda alto y baja cuando hay algo que contar.
+    """
+
+    def __init__(self, pin: int | None) -> None:
+        self._pin = None
+        self.available = False
+        self.pulses = 0
+        if pin is None or DigitalInputDevice is None:
+            return
+        try:
+            self._pin = DigitalInputDevice(pin, pull_up=True)
+            self._pin.when_deactivated = self._on_pulse
+            self.available = True
+        except Exception as exc:
+            print(f"[max30102] no se pudo abrir INT en {pin}: {exc}")
+
+    def _on_pulse(self) -> None:
+        self.pulses += 1
+
+    @property
+    def asserted(self) -> bool:
+        """True si el INT esta activo ahora mismo (en bajo)."""
+        return self.available and not bool(self._pin.value)
+
+    def close(self) -> None:
+        try:
+            if self._pin is not None:
+                self._pin.close()
+        except Exception:
+            pass
 
 
 class MAX30102:
@@ -220,6 +263,14 @@ class MAX30102:
             red.append(((raw[i] << 16) | (raw[i + 1] << 8) | raw[i + 2]) & 0x03FFFF)
             ir.append(((raw[i + 3] << 16) | (raw[i + 4] << 8) | raw[i + 5]) & 0x03FFFF)
         return red, ir
+
+    def read_interrupt_status(self) -> tuple[int, int]:
+        """Registros de interrupcion. Leerlos los limpia.
+
+        Util para diagnostico: si el bit A_FULL (0x80 del primero) se prende,
+        el sensor esta llenando la FIFO de verdad.
+        """
+        return self._read(REG_INTR_STATUS_1), self._read(REG_INTR_STATUS_2)
 
     def read_temperature(self) -> float:
         """Temperatura del die, no del paciente. Sirve para compensar el LED."""

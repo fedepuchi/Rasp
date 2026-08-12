@@ -46,8 +46,11 @@ class EcgConfig:
     # Si los ubicas en RA / pierna izquierda / RL, poné "ECG II".
     lead_label: str = "ECG"
     # Deteccion de electrodo suelto (LO+ / LO-). None = deshabilitado.
-    lo_plus_pin: int | None = 17
-    lo_minus_pin: int | None = 27
+    # OJO: si aca hay un pin que en realidad tiene otra cosa conectada, el
+    # programa lo lee como "electrodo despegado" y el ECG queda en linea plana
+    # sin ninguna explicacion visible. Ante la duda, poné null en los dos.
+    lo_plus_pin: int | None = 22   # pin fisico 15
+    lo_minus_pin: int | None = 27  # pin fisico 13
     # Pin SDN del AD8232 (apagado por hardware). None = no cableado; en ese caso
     # el frente analogico queda encendido y solo se apaga el ADS1115.
     # En bajo apaga el modulo, en alto lo enciende.
@@ -73,6 +76,10 @@ class PpgConfig:
     adc_range_na: int = 4096  # 2048,4096,8192,16384
     led_red_current: int = 0x24  # 0x00..0xFF (~0.2 mA por paso)
     led_ir_current: int = 0x24
+    # Pin INT del MAX30102. None = no cableado.
+    # El driver NO lo necesita: vacia la FIFO por sondeo. Se lee solo como
+    # senial de vida del sensor, y aparece en el diagnostico y en la tecla D.
+    int_pin: int | None = 17  # pin fisico 11
     # Umbral de "hay dedo": DC del infrarrojo por debajo de esto = sensor al aire
     finger_threshold: int = 50_000
     # Filtrado del pulso
@@ -188,6 +195,16 @@ class UiConfig:
     sound_enabled: bool = True
     beat_beep: bool = True  # el "bip" clasico en cada latido
     show_debug: bool = False
+    # Buzzer PASIVO por PWM. None = sin buzzer, el sonido sale por el audio del Pi.
+    # Un buzzer activo NO sirve aca: suena solo con darle tension y no se le
+    # puede cambiar el tono, que es justo lo que hacemos con el bip de latido.
+    buzzer_pin: int | None = 12  # pin fisico 32
+    # Frecuencia central del buzzer. Los pasivos rinden mucho mas cerca de su
+    # resonancia (tipico 2 a 4 kHz); si suena flojo, proba mover esto.
+    buzzer_tone_hz: int = 2400
+    # "auto" usa el buzzer si hay pin configurado, si no el audio del Pi.
+    # Tambien: "audio", "buzzer", "ambos".
+    sound_output: str = "auto"
 
 
 @dataclass

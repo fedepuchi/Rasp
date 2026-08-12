@@ -92,22 +92,39 @@ tener que provocarlas de verdad.
 Todo por I2C, los dos sensores comparten el mismo bus. Las direcciones no
 chocan: ADS1115 en `0x48` y MAX30102 en `0x57`.
 
-| Desde | Hasta | Pin fisico del Pi |
-|---|---|---|
-| ADS1115 VDD | 3V3 | 1 |
-| ADS1115 GND | GND | 6 |
-| ADS1115 SDA | GPIO2 (SDA1) | 3 |
-| ADS1115 SCL | GPIO3 (SCL1) | 5 |
-| ADS1115 ADDR | GND (→ 0x48) | 6 |
-| **AD8232 OUTPUT** | **ADS1115 A0** | — |
-| AD8232 3.3V | 3V3 | 17 |
-| AD8232 GND | GND | 9 |
-| AD8232 LO+ | GPIO17 | 11 |
-| AD8232 LO- | GPIO27 | 13 |
-| MAX30102 VIN | 3V3 | 1 |
-| MAX30102 GND | GND | 6 |
-| MAX30102 SDA | GPIO2 | 3 |
-| MAX30102 SCL | GPIO3 | 5 |
+| Desde | Hasta | Pin fisico del Pi | GPIO |
+|---|---|---|---|
+| ADS1115 VDD | 3V3 | 1 | — |
+| ADS1115 GND | GND | 6 | — |
+| ADS1115 SDA | SDA1 | 3 | 2 |
+| ADS1115 SCL | SCL1 | 5 | 3 |
+| ADS1115 ADDR | GND (→ 0x48) | 6 | — |
+| **AD8232 OUTPUT** | **ADS1115 A0** | — | — |
+| AD8232 3.3V | 3V3 | 17 | — |
+| AD8232 GND | GND | 9 | — |
+| AD8232 LO+ | | 15 | 22 |
+| AD8232 LO- | | 13 | 27 |
+| MAX30102 VIN | 3V3 | 1 | — |
+| MAX30102 GND | GND | 6 | — |
+| MAX30102 SDA | SDA1 | 3 | 2 |
+| MAX30102 SCL | SCL1 | 5 | 3 |
+| MAX30102 INT | opcional | 11 | 17 |
+| Buzzer **pasivo** (+) | opcional | 32 | 12 |
+| Buzzer (−) | GND | 34 | — |
+
+**El pin de cada cosa se puede cambiar** en `config.py` o en un `config.json`.
+Si cambias uno, corre el diagnostico (mas abajo): avisa si quedaron dos cosas
+asignadas al mismo GPIO, que es el error mas dificil de ver a ojo.
+
+Dos aclaraciones sobre los opcionales:
+
+- **El INT del MAX30102 no hace falta.** El driver vacia la FIFO por sondeo. Se
+  lee solo como senial de vida y aparece en el diagnostico. Podes dejarlo
+  desconectado (`ppg.int_pin: null`).
+- **El buzzer tiene que ser PASIVO.** Se maneja por PWM para poder cambiarle el
+  tono, que es lo que hace el bip de latido cuando baja la saturacion. Uno
+  activo suena solo con darle tension y a una sola frecuencia: no sirve. Si no
+  pones buzzer, el sonido sale por la salida de audio del Pi.
 
 **Alimenta el AD8232 con 3.3 V, no con 5 V.** Su salida esta centrada en
 VCC/2, asi que con 5 V las puntas pueden superar lo que tolera la entrada del
@@ -345,6 +362,29 @@ sudo usermod -aG video,render,i2c,gpio $USER
 
 ## Si algo no anda
 
+### Primero: el diagnostico
+
+Antes de tocar nada, corre esto. Prueba cada modulo por separado, no abre
+ninguna ventana (asi que anda por SSH) y te dice exactamente que falla:
+
+```bash
+.venv/bin/python tools/diagnostico.py
+```
+
+Que revisa:
+
+- escanea el bus I2C y confirma que esten el `0x48` y el `0x57`
+- enciende el MAX30102, lee unos segundos y te muestra el DC del infrarrojo y
+  del rojo, si hay dedo y si la senial pulsa
+- lee el ADS1115 y verifica que la continua del AD8232 este cerca de VCC/2, que
+  es la prueba de que el frente analogico esta bien alimentado
+- **avisa si dos cosas quedaron asignadas al mismo GPIO**
+- hace sonar el buzzer con cuatro tonos
+
+Al final imprime una lista de los problemas encontrados y como arreglarlos.
+
+### Despues: los sintomas sueltos
+
 **No aparece nada en `i2cdetect`**
 I2C deshabilitado, o SDA/SCL cruzados, o el modulo sin alimentacion. El
 MAX30102 de las placas moradas a veces necesita resistencias de pull-up de 4.7k
@@ -353,6 +393,16 @@ a 3.3 V en SDA y SCL.
 **`PART_ID inesperado: 0x11`**
 Es un MAX30100, no un MAX30102. Los registros son distintos y este driver no
 le sirve.
+
+**Arranca pero no mide nada, y los LED del MAX30102 no se encienden**
+Es lo esperado: los sensores arrancan **apagados**. Apreta `X` para que midan
+10 segundos, o usa `--continuo` si preferis que midan sin parar.
+
+**Dice ELECTRODO SUELTO todo el tiempo, con el ECG plano**
+Fijate que en `ecg.lo_plus_pin` y `ecg.lo_minus_pin` no haya un GPIO que tenga
+otra cosa conectada. El programa lee ese pin en alto como electrodo despegado
+y silencia el ECG, sin ninguna pista de por que. `tools/diagnostico.py` lo
+detecta. Para descartarlo rapido, poné los dos en `null`.
 
 **El ECG es una linea plana**
 Casi siempre son los electrodos. Si en pantalla dice ELECTRODO SUELTO, LO+/LO-
@@ -417,7 +467,10 @@ ui/
   theme.py          colores, tipografias, grilla
   sound.py          bip de latido y tonos de alarma
 
+sensors/buzzer.py     buzzer pasivo por PWM (esta aca porque es hardware)
+
 tools/
+  diagnostico.py      prueba cada modulo por separado, sin abrir ventana
   receptor_prueba.py  servidor minimo para ver que llega el JSON
 ```
 

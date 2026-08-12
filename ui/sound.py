@@ -12,6 +12,8 @@ import time
 
 import pygame
 
+from sensors.buzzer import Buzzer
+
 SAMPLE_RATE = 22050
 
 
@@ -40,23 +42,45 @@ def _tone(freq: float, duration_s: float, volume: float = 0.35,
 
 
 class SoundEngine:
-    def __init__(self, enabled: bool = True):
+    """Sonido por la salida de audio del Pi, por buzzer pasivo, o los dos."""
+
+    def __init__(self, enabled: bool = True, buzzer_pin: int | None = None,
+                 buzzer_tone_hz: int = 2400, output: str = "auto"):
         self.enabled = enabled
         self.available = False
         self._sounds: dict[str, pygame.mixer.Sound] = {}
         self._beat_cache: dict[int, pygame.mixer.Sound] = {}
         self._last_alarm_at = 0.0
+        self.buzzer = None
+        self.buzzer_tone_hz = buzzer_tone_hz
 
         if not enabled:
             return
+
+        if buzzer_pin is not None and output in ("auto", "buzzer", "ambos"):
+            self.buzzer = Buzzer(buzzer_pin, buzzer_tone_hz)
+            if not self.buzzer.available:
+                self.buzzer = None
+
+        # Con "auto" y buzzer andando, no se levanta el mixer: en un Pi sin
+        # parlantes solo genera ruido en el log de ALSA.
+        want_audio = output in ("audio", "ambos") or \
+            (output == "auto" and self.buzzer is None)
+        if not want_audio:
+            self.available = self.buzzer is not None
+            return
+
         try:
             pygame.mixer.pre_init(SAMPLE_RATE, -16, 2, 512)
             pygame.mixer.init()
             self._build()
             self.available = True
         except Exception as exc:  # sin placa de audio, sin ALSA, etc.
-            print(f"[sonido] deshabilitado: {exc}")
-            self.enabled = False
+            print(f"[sonido] audio deshabilitado: {exc}")
+            if self.buzzer is None:
+                self.enabled = False
+            else:
+                self.available = True
 
     def _build(self) -> None:
         # Alarma de alta prioridad: dos pulsos secos y agudos
@@ -80,13 +104,29 @@ class SoundEngine:
 
     # -- API ---------------------------------------------------------------
 
+    def _buzzer_beat_hz(self, spo2: float | None) -> float:
+        """Mismo criterio que el audio, pero corrido a la banda del buzzer.
+
+        Un buzzer pasivo tipico casi no suena por debajo del kilohertz, asi que
+        los 500-850 Hz del audio ahi no se escucharian.
+        """
+        base = self.buzzer_tone_hz
+        if spo2 is None:
+            return base
+        clamped = max(85.0, min(100.0, spo2))
+        # 85% -> un 25% por debajo del tono base, 100% -> un 15% por encima
+        return base * (0.75 + (clamped - 85.0) / 15.0 * 0.40)
+
     def beat(self, spo2: float | None) -> None:
         if not self.available or not self.enabled:
             return
-        try:
-            self._beat_sound(spo2).play()
-        except pygame.error:
-            pass
+        if self.buzzer is not None:
+            self.buzzer.beep(self._buzzer_beat_hz(spo2), 0.05)
+        if pygame.mixer.get_init():
+            try:
+                self._beat_sound(spo2).play()
+            except pygame.error:
+                pass
 
     def alarm(self, level: str) -> None:
         """Repite el tono de alarma a un ritmo acorde a la prioridad."""
@@ -99,30 +139,50 @@ class SoundEngine:
         if now - self._last_alarm_at < interval:
             return
         self._last_alarm_at = now
+
+        if self.buzzer is not None:
+            freq = {"high": self.buzzer_tone_hz * 1.35,
+                    "medium": self.buzzer_tone_hz,
+                    "low": self.buzzer_tone_hz * 0.8}[level]
+            self.buzzer.beep(freq, 0.14)
+            if level == "high":
+                self.buzzer.beep(freq, 0.14)  # el tono alto va doble
+
         sound = self._sounds.get(level)
-        if sound is None:
+        if sound is None or not pygame.mixer.get_init():
             return
         try:
             sound.play()
-            if level == "high":  # el tono alto va doble
+            if level == "high":
                 pygame.time.set_timer(pygame.USEREVENT + 1, 170, loops=1)
         except pygame.error:
             pass
 
     def repeat_high(self) -> None:
-        if self.available and self.enabled:
+        if self.available and self.enabled and pygame.mixer.get_init():
             try:
                 self._sounds["high"].play()
             except pygame.error:
                 pass
+
+    def test(self) -> None:
+        """Secuencia corta para probar que el sonido sale por algun lado."""
+        for spo2 in (100, 95, 90, 85):
+            self.beat(spo2)
+            time.sleep(0.35)
+        self._last_alarm_at = 0.0
+        self.alarm("high")
+        time.sleep(0.8)
 
     def toggle(self) -> bool:
         self.enabled = not self.enabled
         return self.enabled
 
     def close(self) -> None:
-        if self.available:
-            try:
+        if self.buzzer is not None:
+            self.buzzer.close()
+        try:
+            if pygame.mixer.get_init():
                 pygame.mixer.quit()
-            except Exception:
-                pass
+        except Exception:
+            pass

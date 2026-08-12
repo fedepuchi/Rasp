@@ -103,7 +103,12 @@ def main() -> int:
         return 0
 
     pygame.init()
-    sound = SoundEngine(enabled=cfg.ui.sound_enabled)
+    sound = SoundEngine(
+        enabled=cfg.ui.sound_enabled,
+        buzzer_pin=cfg.ui.buzzer_pin,
+        buzzer_tone_hz=cfg.ui.buzzer_tone_hz,
+        output=cfg.ui.sound_output,
+    )
     alarms = AlarmManager(cfg.alarms)
     ui = MonitorUI(cfg, alarms, sound)
 
