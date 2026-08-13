@@ -156,6 +156,10 @@ class SessionConfig:
     # Cuanto queda el resumen en pantalla antes de volver a la espera.
     # 0 = para siempre, hasta que se apriete la tecla otra vez.
     result_hold_s: float = 0.0
+    # True  = pantallas completas de espera y de resultado (tapan las ondas)
+    # False = la pantalla se ve siempre igual y solo aparece un cartelito
+    #         arriba con el estado. La tecla sigue mandando igual.
+    show_overlays: bool = True
     # Apagar los sensores mientras no se mide (menos consumo y menos calor en
     # el MAX30102, que si queda encendido con el dedo puesto se entibia).
     power_down_idle: bool = True

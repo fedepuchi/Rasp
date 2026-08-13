@@ -635,14 +635,70 @@ class MonitorUI:
 
     def _draw_session(self, snapshot) -> None:
         state = self.session.state
+        # Sin paneles, la vista queda siempre igual y el estado se resume en un
+        # cartelito arriba, que no tapa las ondas.
+        compacto = not self.cfg.session.show_overlays
+
         if state == session_mod.IDLE:
-            self._draw_idle_screen()
+            if compacto:
+                self._draw_status_badge(
+                    f"EN ESPERA  ·  {self._key_hint()} PARA MEDIR", TEXT_DIM)
+            else:
+                self._draw_idle_screen()
         elif state == session_mod.WARMUP:
             self._draw_progress_badge("ESTABILIZANDO SENSORES", TEXT_DIM)
         elif state == session_mod.MEASURING:
             self._draw_progress_badge("MIDIENDO", OK, countdown=True)
         elif state == session_mod.RESULT:
-            self._draw_result_screen()
+            if compacto:
+                self._draw_result_badge()
+            else:
+                self._draw_result_screen()
+
+    def _badge_rect(self, height: int, ancho: float = 0.34) -> pygame.Rect:
+        rect = self.waves_rect
+        badge = pygame.Rect(0, 0, int(rect.width * ancho), height)
+        badge.midtop = (rect.centerx, rect.top + 10)
+        return badge
+
+    def _badge_bg(self, badge: pygame.Rect, color) -> None:
+        overlay = pygame.Surface(badge.size, pygame.SRCALPHA)
+        overlay.fill((3, 6, 12, 215))
+        self.screen.blit(overlay, badge.topleft)
+        pygame.draw.rect(self.screen, color, badge, 1, border_radius=4)
+
+    def _draw_status_badge(self, texto: str, color) -> None:
+        badge = self._badge_rect(34)
+        self._badge_bg(badge, color)
+        blit_text(self.screen, self.fonts.sans(16, bold=True), texto, color,
+                  badge.center, align="middle")
+
+    def _draw_result_badge(self) -> None:
+        """Resumen de una linea, para el modo sin paneles."""
+        summary = self.session.last_summary
+        if summary is None:
+            self._draw_status_badge(
+                f"{self._key_hint()} PARA MEDIR", TEXT_DIM)
+            return
+
+        partes = [f"MEDICION #{self.session.measurements}"]
+        if summary.hr.mean is not None:
+            partes.append(f"FC {summary.hr.mean:.0f}")
+        if summary.spo2.mean is not None:
+            partes.append(f"SpO2 {summary.spo2.mean:.0f}")
+        if summary.pr.mean is not None:
+            partes.append(f"PR {summary.pr.mean:.0f}")
+
+        color = ALARM_MEDIUM if (summary.problems or summary.aborted) else OK
+        badge = self._badge_rect(46, ancho=0.42)
+        self._badge_bg(badge, color)
+        blit_text(self.screen, self.fonts.sans(16, bold=True),
+                  "   ·   ".join(partes), color,
+                  (badge.centerx, badge.top + 5), align="center")
+        detalle = summary.problems[0] if summary.problems \
+            else f"{self._key_hint()} para repetir"
+        blit_text(self.screen, self.fonts.sans(12), detalle, TEXT_FAINT,
+                  (badge.centerx, badge.bottom - 17), align="center")
 
     def _dim_panel(self, rect: pygame.Rect, alpha: int = 225) -> None:
         overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
@@ -689,15 +745,8 @@ class MonitorUI:
 
     def _draw_progress_badge(self, label: str, color, countdown: bool = False) -> None:
         """Cartel compacto arriba: deja ver las ondas mientras mide."""
-        rect = self.waves_rect
-        width = int(rect.width * 0.34)
-        badge = pygame.Rect(0, 0, width, 54)
-        badge.midtop = (rect.centerx, rect.top + 10)
-
-        overlay = pygame.Surface(badge.size, pygame.SRCALPHA)
-        overlay.fill((3, 6, 12, 215))
-        self.screen.blit(overlay, badge.topleft)
-        pygame.draw.rect(self.screen, color, badge, 1, border_radius=4)
+        badge = self._badge_rect(54)
+        self._badge_bg(badge, color)
 
         blit_text(self.screen, self.fonts.sans(17, bold=True), label, color,
                   (badge.left + 14, badge.top + 8))

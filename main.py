@@ -62,6 +62,9 @@ def parse_args() -> argparse.Namespace:
                         help="segundos de cada medicion (default 10)")
     parser.add_argument("--medir-al-inicio", action="store_true",
                         help="dispara una medicion apenas arranca, sin esperar la tecla")
+    parser.add_argument("--sin-paneles", action="store_true",
+                        help="sin pantallas de espera ni de resultado: la vista "
+                             "queda siempre igual y la tecla solo controla la medicion")
     parser.add_argument("--notch", type=float, metavar="HZ",
                         help="frecuencia de red para el notch (50 o 60)")
     parser.add_argument("--captura", metavar="ARCHIVO.png",
@@ -90,6 +93,8 @@ def build_config(args: argparse.Namespace) -> Config:
         cfg.session.manual = False
     if args.duracion:
         cfg.session.duration_s = args.duracion
+    if args.sin_paneles:
+        cfg.session.show_overlays = False
     return cfg
 
 

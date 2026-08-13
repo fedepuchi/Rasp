@@ -231,6 +231,10 @@ Que pasa en cada fase:
 | **Midiendo** | encendidos y grabando | ondas, numeros y cuenta regresiva |
 | **Resultado** | apagados otra vez | promedio, minimo y maximo de cada signo |
 
+Con **`--sin-paneles`** las pantallas de espera y de resultado no aparecen: la
+vista es siempre la misma y el estado se resume en un cartelito arriba, sin
+tapar las ondas. Los numeros del panel quedan congelados en la ultima medicion.
+
 ### Por que hay una fase de estabilizacion
 
 Los pasa-altos de 0.5 Hz del ECG y del pletismografo arrancan con un transitorio
@@ -262,6 +266,7 @@ La cuenta completa de por que hacen falta esos segundos esta en
 | Opcion | Que hace |
 |---|---|
 | `--duracion 30` | segundos de cada medicion |
+| `--sin-paneles` | sin pantallas de espera ni de resultado: la vista queda siempre igual y la tecla solo controla cuando adquiere |
 | `--continuo` | modo monitor de cama: mide siempre, sin tecla |
 | `--medir-al-inicio` | dispara una medicion al arrancar (util para un kiosco) |
 | `session.key` | que tecla dispara (default `x`) |
