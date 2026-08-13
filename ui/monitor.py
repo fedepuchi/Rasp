@@ -539,6 +539,16 @@ class MonitorUI:
         self._box_frame(rect, "PR", "lpm", PLETH, source="MAX30102 · pleth")
         self._big_number(rect, snapshot.pr_bpm, PLETH, size=64)
 
+        # Punto que destella con cada pulso detectado. Sirve para comprobar a
+        # ojo que el numero se corresponde con la onda del pleth: si destella
+        # dos veces por cada pico de la onda, el detector esta contando de mas.
+        if time.monotonic() - self._last_pulse_flash < 0.18:
+            pygame.draw.circle(self.screen, PLETH,
+                               (rect.left + 26, rect.bottom - 30), 9)
+        else:
+            pygame.draw.circle(self.screen, PANEL_BORDER,
+                               (rect.left + 26, rect.bottom - 30), 9, 1)
+
         deficit = snapshot.pulse_deficit
         if deficit is not None:
             # Que FC y PR se separen no es un error de medicion: son dos cosas
