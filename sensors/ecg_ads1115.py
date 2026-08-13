@@ -18,9 +18,10 @@ from __future__ import annotations
 import time
 
 try:
-    from smbus2 import SMBus
+    from smbus2 import SMBus, i2c_msg
 except ImportError:  # pragma: no cover
     SMBus = None
+    i2c_msg = None
 
 try:
     from gpiozero import DigitalInputDevice, DigitalOutputDevice
@@ -70,6 +71,7 @@ class ADS1115:
         self.address = address
         self.data_rate = data_rate
         self.pga_volts = pga_volts
+        self._bus_number = bus
         # 15 bits utiles con signo
         self.volts_per_count = pga_volts / 32768.0
 
@@ -87,24 +89,66 @@ class ADS1115:
         )
         self._start()
 
+    def _read_register(self, reg: int) -> int:
+        """Lee un registro de 16 bits con transacciones explicitas.
+
+        Se usa i2c_rdwr en vez de read_i2c_block_data a proposito: es el mismo
+        camino que ya funciona con el MAX30102 en este Pi. read_i2c_block_data
+        arma internamente el START repetido de otra forma, y hay
+        combinaciones de placa y kernel donde eso devuelve EIO aunque las
+        escrituras al mismo chip anden perfecto.
+        """
+        write = i2c_msg.write(self.address, [reg])
+        read = i2c_msg.read(self.address, 2)
+        self._bus.i2c_rdwr(write, read)
+        data = list(read)
+        return (data[0] << 8) | data[1]
+
+    def _write_config(self, config: int) -> None:
+        write = i2c_msg.write(self.address,
+                              [REG_CONFIG, (config >> 8) & 0xFF, config & 0xFF])
+        self._bus.i2c_rdwr(write)
+
     def _start(self) -> None:
         try:
-            self._bus.write_i2c_block_data(
-                self.address, REG_CONFIG,
-                [(self._config >> 8) & 0xFF, self._config & 0xFF],
-            )
+            self._write_config(self._config)
         except OSError as exc:
             raise AdsError(
                 f"No responde el ADS1115 en 0x{self.address:02X}. "
                 "Verifica el cableado y 'i2cdetect -y 1'."
             ) from exc
+
+        # Leemos de vuelta la configuracion: si el chip devuelve lo mismo que
+        # le escribimos, es efectivamente un ADS1115 y el bus anda en los dos
+        # sentidos. Sin esta comprobacion, un dispositivo distinto en la misma
+        # direccion se descubre recien cuando las lecturas dan basura.
+        try:
+            readback = self._read_register(REG_CONFIG)
+        except OSError as exc:
+            raise AdsError(
+                f"El chip en 0x{self.address:02X} acepta escrituras pero no se "
+                f"deja leer ({exc}). Suele ser SDA flojo, o un dispositivo que "
+                f"no es un ADS1115 respondiendo en esa direccion. "
+                f"Comproba a mano con:  i2cget -y {self._bus_number} "
+                f"0x{self.address:02X} 0x01 w"
+            ) from exc
+
+        # El bit 15 (OS) es de solo lectura y refleja el estado, no lo que se
+        # escribio: se ignora en la comparacion.
+        if (readback & 0x7FFF) != (self._config & 0x7FFF):
+            raise AdsError(
+                f"El chip en 0x{self.address:02X} responde pero no se comporta "
+                f"como un ADS1115: se escribio 0x{self._config:04X} y devolvio "
+                f"0x{readback:04X}. Revisa que sea realmente un ADS1115 y que "
+                f"el pin ADDR este firme a GND."
+            )
+
         # Le damos tiempo a que salga la primera conversion
         time.sleep(2.0 / self.data_rate)
 
     def read_counts(self) -> int:
         """Ultima conversion, en cuentas con signo (-32768..32767)."""
-        data = self._bus.read_i2c_block_data(self.address, REG_CONVERSION, 2)
-        value = (data[0] << 8) | data[1]
+        value = self._read_register(REG_CONVERSION)
         if value & 0x8000:
             value -= 0x10000
         return value
@@ -117,12 +161,8 @@ class ADS1115:
 
         Como no lo vamos a disparar, se queda en bajo consumo indefinidamente.
         """
-        config = self._config | (1 << 8)  # MODE = single-shot
         try:
-            self._bus.write_i2c_block_data(
-                self.address, REG_CONFIG,
-                [(config >> 8) & 0xFF, config & 0xFF],
-            )
+            self._write_config(self._config | (1 << 8))  # MODE = single-shot
         except OSError:
             pass
 

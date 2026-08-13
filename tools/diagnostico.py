@@ -166,6 +166,18 @@ def probar_max30102(cfg: Config, segundos: float) -> None:
     # modulo entrega los LED cambiados respecto de la hoja de datos, cosa
     # frecuente en los clones. Con los canales invertidos la relacion R queda
     # dada vuelta y el SpO2 sale disparatado.
+    if dc_ir < cfg.ppg.finger_threshold:
+        aviso("NO HABIA DEDO EN EL SENSOR durante esta prueba")
+        print(f"         El DC del infrarrojo dio {dc_ir:.0f} y el umbral de dedo")
+        print(f"         es {cfg.ppg.finger_threshold}. Con un dedo apoyado tiene que")
+        print("         dar decenas de miles.")
+        print("         La comprobacion de canales rojo/IR invertidos NO se pudo")
+        print("         hacer: repeti la prueba con el dedo puesto desde el")
+        print("         principio y sin moverlo.")
+        _problemas.append("la prueba del MAX30102 se hizo sin el dedo puesto"
+                          "\n         -> repetila apoyando el dedo antes de que "
+                          "arranque la cuenta")
+
     if dc_ir > cfg.ppg.finger_threshold and dc_rojo > dc_ir:
         if cfg.ppg.swap_leds:
             falla("el rojo sigue leyendo mas alto que el infrarrojo aun con "
@@ -180,11 +192,7 @@ def probar_max30102(cfg: Config, segundos: float) -> None:
     elif dc_ir > cfg.ppg.finger_threshold:
         ok("el infrarrojo lee mas alto que el rojo, como corresponde")
 
-    if dc_ir < cfg.ppg.finger_threshold:
-        aviso(f"DC del infrarrojo por debajo del umbral de dedo "
-              f"({cfg.ppg.finger_threshold}). Sin dedo apoyado esto es normal; "
-              f"con el dedo puesto, subi led_red_current y led_ir_current")
-    else:
+    if dc_ir >= cfg.ppg.finger_threshold:
         ok("hay dedo detectado")
         if variacion < dc_ir * 0.002:
             aviso("la senial casi no varia: el dedo esta muy apretado, o muy "
