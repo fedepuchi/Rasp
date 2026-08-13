@@ -161,6 +161,25 @@ def probar_max30102(cfg: Config, segundos: float) -> None:
     print(f"       DC infrarrojo {dc_ir:9.0f}   DC rojo {dc_rojo:9.0f}")
     print(f"       variacion del infrarrojo: {variacion:.0f} cuentas")
 
+    # Con un dedo puesto el infrarrojo SIEMPRE tiene que dar mas alto que el
+    # rojo: el tejido absorbe mucho mas el rojo. Al reves significa que el
+    # modulo entrega los LED cambiados respecto de la hoja de datos, cosa
+    # frecuente en los clones. Con los canales invertidos la relacion R queda
+    # dada vuelta y el SpO2 sale disparatado.
+    if dc_ir > cfg.ppg.finger_threshold and dc_rojo > dc_ir:
+        if cfg.ppg.swap_leds:
+            falla("el rojo sigue leyendo mas alto que el infrarrojo aun con "
+                  "swap_leds activado",
+                  "proba volver swap_leds a false: puede que el problema sea otro")
+        else:
+            falla("el ROJO lee mas alto que el INFRARROJO, y tiene que ser al reves",
+                  "tu modulo trae los LED invertidos. Arreglo:\n"
+                  "            echo '{\"ppg\": {\"swap_leds\": true}}' "
+                  "> ~/monitor_vital/config.json\n"
+                  "            y despues corre todo con  --config config.json")
+    elif dc_ir > cfg.ppg.finger_threshold:
+        ok("el infrarrojo lee mas alto que el rojo, como corresponde")
+
     if dc_ir < cfg.ppg.finger_threshold:
         aviso(f"DC del infrarrojo por debajo del umbral de dedo "
               f"({cfg.ppg.finger_threshold}). Sin dedo apoyado esto es normal; "

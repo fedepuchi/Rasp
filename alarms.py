@@ -93,6 +93,11 @@ class AlarmManager:
                                     "SENIAL DE ECG SATURADA"))
         if not snapshot.finger_detected:
             candidates.append(Alarm("NO_PROBE", TECHNICAL, "SIN DEDO EN EL SENSOR"))
+        elif snapshot.spo2_out_of_range >= 3:
+            # Sin este aviso, el SpO2 queda en guiones y no hay forma de saber
+            # por que. La causa mas comun son los canales rojo/IR invertidos.
+            candidates.append(Alarm("SPO2_INVALIDO", TECHNICAL,
+                                    "SpO2 FUERA DE RANGO - VER CANALES LED"))
         if not snapshot.backend_ok and snapshot.backend_enabled:
             candidates.append(Alarm("NET_DOWN", TECHNICAL, "SIN CONEXION AL SERVIDOR"))
 

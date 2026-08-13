@@ -76,6 +76,14 @@ class PpgConfig:
     adc_range_na: int = 4096  # 2048,4096,8192,16384
     led_red_current: int = 0x24  # 0x00..0xFF (~0.2 mA por paso)
     led_ir_current: int = 0x24
+    # Muchos modulos clones traen los LED al reves de lo que dice la hoja de
+    # datos: lo que sale primero en la FIFO es el infrarrojo y no el rojo. Con
+    # los canales cambiados la relacion R queda invertida y el SpO2 da
+    # cualquier cosa. Como saberlo: con el dedo puesto, el DC del infrarrojo
+    # tiene que ser MAYOR que el del rojo, porque el tejido absorbe mucho mas
+    # el rojo. Si da al reves, poné esto en true.
+    # tools/diagnostico.py lo detecta y avisa.
+    swap_leds: bool = False
     # Pin INT del MAX30102. None = no cableado.
     # El driver NO lo necesita: vacia la FIFO por sondeo. Se lee solo como
     # senial de vida del sensor, y aparece en el diagnostico y en la tecla D.

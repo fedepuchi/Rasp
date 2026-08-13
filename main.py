@@ -282,6 +282,7 @@ def main() -> int:
                 snapshot.ecg_noise = ecg_proc.noise_level
                 snapshot.ecg_saturated = ecg_proc.saturated
                 snapshot.finger_detected = ppg_proc.finger_detected
+                snapshot.spo2_out_of_range = ppg_proc.out_of_range
                 # Diagnostico del equipo, no del paciente
                 snapshot.sensor_die_temp_c = last_temp
                 snapshot.ecg_baseline_v = ecg_proc.baseline_v

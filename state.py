@@ -36,6 +36,7 @@ class VitalsSnapshot:
     ecg_noise: float = 0.0
     ecg_saturated: bool = False          # el AD8232 pega contra el riel del ADS1115
     finger_detected: bool = False
+    spo2_out_of_range: int = 0           # veces seguidas que la curva dio fuera de 70-100%
     ecg_active: bool = False             # el hardware de ECG arranco bien
     ppg_active: bool = False
     seconds_since_beat: float = 999.0
@@ -88,6 +89,7 @@ class VitalsSnapshot:
             "ecg_noise": round(self.ecg_noise, 3),
             "ecg_saturated": self.ecg_saturated,
             "finger_detected": self.finger_detected,
+            "spo2_out_of_range": self.spo2_out_of_range,
             "ecg_active": self.ecg_active,
             "ppg_active": self.ppg_active,
         }

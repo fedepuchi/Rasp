@@ -208,6 +208,7 @@ class PpgThread(_PacedThread):
             adc_range_na=self.cfg.ppg.adc_range_na,
             led_red_current=self.cfg.ppg.led_red_current,
             led_ir_current=self.cfg.ppg.led_ir_current,
+            swap_leds=self.cfg.ppg.swap_leds,
         )
         self.fs = self._sensor.output_rate_hz
         self._int = DataReadyPin(self.cfg.ppg.int_pin)

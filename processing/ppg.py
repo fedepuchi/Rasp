@@ -101,6 +101,9 @@ class PpgProcessor:
         self.perfusion_index: float | None = None
         self.resp_rpm: float | None = None
         self.finger_detected = False
+        # Cuantas veces seguidas la formula dio fuera de 70-100%. Si sube y no
+        # baja, la senial esta rota o los canales estan invertidos.
+        self.out_of_range = 0
 
     # -- API principal -----------------------------------------------------
 
@@ -213,7 +216,18 @@ class PpgProcessor:
                         if len(self._ratios) >= 3:
                             r = median(list(self._ratios))
                             value = -45.06 * r * r + 30.354 * r + 94.845
-                            self.spo2 = round(max(70.0, min(100.0, value)), 1)
+                            if 70.0 <= value <= 100.0:
+                                self.spo2 = round(value, 1)
+                                self.out_of_range = 0
+                            else:
+                                # NO se recorta al rango. Clavar el numero en
+                                # 70 mostraria una saturacion critica que nadie
+                                # midio, y parece una lectura real. Fuera de
+                                # 70-100 la curva directamente no aplica, y en
+                                # la practica significa senial rota o canales
+                                # rojo/IR invertidos (ver ppg.swap_leds).
+                                self.spo2 = None
+                                self.out_of_range += 1
 
         self._win_ir.clear()
         self._win_red.clear()

@@ -111,6 +111,7 @@ class MAX30102:
         adc_range_na: int = 4096,
         led_red_current: int = 0x24,
         led_ir_current: int = 0x24,
+        swap_leds: bool = False,
     ) -> None:
         if SMBus is None:
             raise Max30102Error(
@@ -130,6 +131,7 @@ class MAX30102:
         self.address = address
         self.averaging = averaging
         self.sample_rate_hz = sample_rate_hz
+        self.swap_leds = swap_leds
         # Frecuencia real a la que salen muestras de la FIFO
         self.output_rate_hz = sample_rate_hz / averaging
 
@@ -262,6 +264,10 @@ class MAX30102:
         for i in range(0, len(raw) - BYTES_PER_SAMPLE + 1, BYTES_PER_SAMPLE):
             red.append(((raw[i] << 16) | (raw[i + 1] << 8) | raw[i + 2]) & 0x03FFFF)
             ir.append(((raw[i + 3] << 16) | (raw[i + 4] << 8) | raw[i + 5]) & 0x03FFFF)
+        # Segun la hoja de datos el primer bloque es LED1 (rojo) y el segundo
+        # LED2 (infrarrojo). Varios modulos clones los traen al reves.
+        if self.swap_leds:
+            return ir, red
         return red, ir
 
     def read_interrupt_status(self) -> tuple[int, int]:
