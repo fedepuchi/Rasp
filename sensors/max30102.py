@@ -274,10 +274,16 @@ class MAX30102:
 
     def read_temperature(self) -> float:
         """Temperatura del die, no del paciente. Sirve para compensar el LED."""
+        # Limpiamos interrupciones viejas y pedimos una conversion
+        self._read(REG_INTR_STATUS_2)
         self._write(REG_TEMP_CONFIG, 0x01)
-        deadline = time.monotonic() + 0.2
-        while self._read(REG_TEMP_CONFIG) & 0x01:
-            if time.monotonic() > deadline:
+        # OJO: el bit TEMP_EN se autolimpia apenas arranca la conversion, no
+        # cuando termina. Esperarlo a el devuelve 0.0 siempre. Lo que hay que
+        # esperar es DIE_TEMP_RDY del registro de interrupciones; la conversion
+        # tarda unos 29 ms.
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            if self._read(REG_INTR_STATUS_2) & 0x02:
                 break
             time.sleep(0.005)
         integer = self._read(REG_TEMP_INT)
