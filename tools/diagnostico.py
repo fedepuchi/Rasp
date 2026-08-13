@@ -43,6 +43,10 @@ def ok(texto: str) -> None:
     print(f"{OK} {texto}")
 
 
+def _f(valor, decimales: int = 1) -> str:
+    return "---" if valor is None else f"{valor:.{decimales}f}"
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -98,6 +102,10 @@ def probar_max30102(cfg: Config, segundos: float) -> None:
             adc_range_na=cfg.ppg.adc_range_na,
             led_red_current=cfg.ppg.led_red_current,
             led_ir_current=cfg.ppg.led_ir_current,
+            # A proposito SIN aplicar swap_leds: queremos ver que entrega la
+            # placa tal cual, no lo que ya corregimos por configuracion. El
+            # diagnostico despues prueba las dos orientaciones y decide.
+            swap_leds=False,
         )
     except (Max30102Error, OSError) as exc:
         falla(f"no se pudo inicializar: {exc}")
@@ -112,10 +120,15 @@ def probar_max30102(cfg: Config, segundos: float) -> None:
     elif not pin_int.available:
         aviso(f"INT configurado en GPIO{cfg.ppg.int_pin} pero no se pudo abrir")
 
-    print(f"\n  Poné el dedo en el sensor. Midiendo {segundos:.0f} s...\n")
+    # El SpO2 necesita asentar los filtros (3 s) y despues 3 latidos: con
+    # menos de 12 s no se puede decidir cual orientacion es la correcta.
+    segundos = max(segundos, 12.0)
+    print(f"\n  Poné el dedo en el sensor AHORA y no lo muevas.")
+    print(f"  Midiendo {segundos:.0f} s...\n")
     sensor.wake()
     time.sleep(0.1)
 
+    # led1 y led2 en el orden que los entrega el chip, sin interpretar
     rojo: list[int] = []
     ir: list[int] = []
     fin = time.monotonic() + segundos
@@ -155,50 +168,33 @@ def probar_max30102(cfg: Config, segundos: float) -> None:
         aviso("llegaron muchas menos de las esperadas: el bus I2C puede estar "
               "a 100 kHz. Subilo a 400 kHz en /boot/firmware/config.txt")
 
-    dc_ir = sum(ir) / len(ir)
-    dc_rojo = sum(rojo) / len(rojo)
-    variacion = max(ir) - min(ir)
-    print(f"       DC infrarrojo {dc_ir:9.0f}   DC rojo {dc_rojo:9.0f}")
-    print(f"       variacion del infrarrojo: {variacion:.0f} cuentas")
+    dc_led1 = sum(rojo) / len(rojo)
+    dc_led2 = sum(ir) / len(ir)
+    mayor = max(dc_led1, dc_led2)
+    print(f"       LED1 (rojo segun la hoja de datos)       DC {dc_led1:9.0f}")
+    print(f"       LED2 (infrarrojo segun la hoja de datos) DC {dc_led2:9.0f}")
 
-    # Con un dedo puesto el infrarrojo SIEMPRE tiene que dar mas alto que el
-    # rojo: el tejido absorbe mucho mas el rojo. Al reves significa que el
-    # modulo entrega los LED cambiados respecto de la hoja de datos, cosa
-    # frecuente en los clones. Con los canales invertidos la relacion R queda
-    # dada vuelta y el SpO2 sale disparatado.
-    if dc_ir < cfg.ppg.finger_threshold:
+    if mayor < cfg.ppg.finger_threshold:
         aviso("NO HABIA DEDO EN EL SENSOR durante esta prueba")
-        print(f"         El DC del infrarrojo dio {dc_ir:.0f} y el umbral de dedo")
-        print(f"         es {cfg.ppg.finger_threshold}. Con un dedo apoyado tiene que")
-        print("         dar decenas de miles.")
-        print("         La comprobacion de canales rojo/IR invertidos NO se pudo")
-        print("         hacer: repeti la prueba con el dedo puesto desde el")
-        print("         principio y sin moverlo.")
+        print(f"         El DC mas alto dio {mayor:.0f} y el umbral de dedo es")
+        print(f"         {cfg.ppg.finger_threshold}. Con un dedo apoyado tiene que dar")
+        print("         decenas de miles. Repeti la prueba con el dedo puesto")
+        print("         ANTES de que arranque la cuenta, y sin moverlo.")
         _problemas.append("la prueba del MAX30102 se hizo sin el dedo puesto"
                           "\n         -> repetila apoyando el dedo antes de que "
                           "arranque la cuenta")
+        pin_int.close()
+        return
 
-    if dc_ir > cfg.ppg.finger_threshold and dc_rojo > dc_ir:
-        if cfg.ppg.swap_leds:
-            falla("el rojo sigue leyendo mas alto que el infrarrojo aun con "
-                  "swap_leds activado",
-                  "proba volver swap_leds a false: puede que el problema sea otro")
-        else:
-            falla("el ROJO lee mas alto que el INFRARROJO, y tiene que ser al reves",
-                  "tu modulo trae los LED invertidos. Arreglo:\n"
-                  "            echo '{\"ppg\": {\"swap_leds\": true}}' "
-                  "> ~/monitor_vital/config.json\n"
-                  "            y despues corre todo con  --config config.json")
-    elif dc_ir > cfg.ppg.finger_threshold:
-        ok("el infrarrojo lee mas alto que el rojo, como corresponde")
+    ok("hay dedo detectado")
+    variacion = max(ir) - min(ir)
+    if variacion < dc_led2 * 0.002:
+        aviso("la senial casi no varia: el dedo esta muy apretado, o muy "
+              "flojo, o el sensor no hace buen contacto")
+    else:
+        ok("la senial pulsa")
 
-    if dc_ir >= cfg.ppg.finger_threshold:
-        ok("hay dedo detectado")
-        if variacion < dc_ir * 0.002:
-            aviso("la senial casi no varia: el dedo esta muy apretado, o muy "
-                  "flojo, o el sensor no hace buen contacto")
-        else:
-            ok("la senial pulsa")
+    _probar_orientacion_leds(cfg, rojo, ir, sensor.output_rate_hz)
 
     if temperatura is not None:
         ok(f"temperatura del chip {temperatura:.1f} C (del chip, NO del paciente)")
@@ -209,6 +205,62 @@ def probar_max30102(cfg: Config, segundos: float) -> None:
             aviso(f"INT nunca cambio: no esta conectado a GPIO{cfg.ppg.int_pin}, "
                   f"o esta en otro pin. No afecta la medicion")
     pin_int.close()
+
+
+def _evaluar_orientacion(rojo: list[int], ir: list[int], fs: float):
+    """Pasa las muestras por la cadena real de SpO2 y devuelve el procesador."""
+    from processing import PpgProcessor
+
+    proc = PpgProcessor(fs, resp_fs=25)
+    paso = max(1, int(fs * 0.02))  # bloques de 20 ms, como en la vida real
+    for i in range(0, len(ir) - paso + 1, paso):
+        proc.process(rojo[i:i + paso], ir[i:i + paso])
+    return proc
+
+
+def _probar_orientacion_leds(cfg: Config, led1: list[int], led2: list[int],
+                             fs: float) -> None:
+    """Decide cual de los dos LED es el rojo, midiendo el SpO2 en ambos sentidos.
+
+    Mirar cual DC es mas alto es un indicio, no una prueba: cuanto entrega cada
+    LED depende de la eficiencia del diodo y de la sensibilidad del fotodetector
+    a cada longitud de onda, y eso cambia de placa en placa. Lo que no cambia es
+    que solo UNA de las dos orientaciones puede dar una saturacion posible: en
+    la otra, la relacion R queda invertida y la curva se va fuera de 70-100%.
+    """
+    print("\n  Probando las dos orientaciones de los LED...")
+    normal = _evaluar_orientacion(led1, led2, fs)      # rojo=LED1, ir=LED2
+    invertida = _evaluar_orientacion(led2, led1, fs)   # rojo=LED2, ir=LED1
+
+    print(f"       hoja de datos (rojo=LED1)  -> SpO2 {_f(normal.spo2)}"
+          f"   PI {_f(normal.perfusion_index)}")
+    print(f"       invertida     (rojo=LED2)  -> SpO2 {_f(invertida.spo2)}"
+          f"   PI {_f(invertida.perfusion_index)}")
+
+    if normal.spo2 is not None and invertida.spo2 is None:
+        correcto = False
+    elif invertida.spo2 is not None and normal.spo2 is None:
+        correcto = True
+    elif normal.spo2 is None and invertida.spo2 is None:
+        falla("ninguna de las dos orientaciones da un SpO2 posible",
+              "la senial no alcanza. Apoya el dedo firme pero sin apretar, no lo\n"
+              "            muevas, y si el PI queda por debajo de 0.5 subi\n"
+              "            led_red_current y led_ir_current a 51")
+        return
+    else:
+        aviso("las dos orientaciones dan un valor posible: no se puede decidir")
+        print("         Repeti la prueba quieto y con buena perfusion.")
+        return
+
+    print()
+    if correcto == cfg.ppg.swap_leds:
+        ok(f"swap_leds = {str(cfg.ppg.swap_leds).lower()} es el valor correcto "
+           f"para esta placa")
+    else:
+        falla(f"swap_leds esta en {str(cfg.ppg.swap_leds).lower()} y tiene que "
+              f"estar en {str(correcto).lower()}",
+              "corregilo en tu config.json:\n"
+              f"            \"ppg\": {{\"swap_leds\": {str(correcto).lower()}}}")
 
 
 def probar_ads1115(cfg: Config, segundos: float) -> None:
