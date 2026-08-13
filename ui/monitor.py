@@ -18,7 +18,8 @@ from config import Config
 from . import theme
 from .theme import (
     ALARM_HIGH, ALARM_MEDIUM, BG, ECG, HEADER_BG, LEVEL_COLORS, OK, PANEL_BG,
-    PANEL_BORDER, PLETH, RESP, TEXT, TEXT_DIM, TEXT_FAINT, Fonts, blit_text,
+    BOX_BORDER, PANEL_BORDER, PLETH, PULSE, RESP, TEXT, TEXT_DIM, TEXT_FAINT,
+    Fonts, blit_text,
     draw_heart, make_grid, make_plain_background,
 )
 
@@ -461,11 +462,22 @@ class MonitorUI:
     def _box_frame(self, rect: pygame.Rect, label: str, unit: str, color,
                    limits: str | None = None, source: str | None = None) -> None:
         pygame.draw.rect(self.screen, PANEL_BG, rect, border_radius=5)
-        pygame.draw.rect(self.screen, PANEL_BORDER, rect, 1, border_radius=5)
+        pygame.draw.rect(self.screen, BOX_BORDER, rect, 1, border_radius=5)
+
+        # Barra del color del signo vital pegada al borde izquierdo, de punta a
+        # punta de la caja. Es lo que ata visualmente el rotulo con su numero:
+        # el rotulo va arriba y el numero al medio, y sin algo que los agrupe el
+        # ojo termina asociando cada numero con la caja de al lado.
+        pygame.draw.rect(self.screen, color,
+                         pygame.Rect(rect.left + 1, rect.top + 1, 6, rect.height - 2),
+                         border_top_left_radius=4, border_bottom_left_radius=4)
+
         blit_text(self.screen, self.fonts.sans(19, bold=True), label, color,
-                  (rect.left + 10, rect.top + 7))
-        blit_text(self.screen, self.fonts.sans(13), unit, TEXT_FAINT,
-                  (rect.left + 10, rect.top + 31))
+                  (rect.left + 16, rect.top + 7))
+        # La unidad es lo que distingue un 94 de saturacion de un 94 de pulso.
+        # Tiene que leerse, no ser una nota al pie.
+        blit_text(self.screen, self.fonts.sans(16, bold=True), unit, TEXT_DIM,
+                  (rect.left + 16, rect.top + 31))
         if limits:
             blit_text(self.screen, self.fonts.sans(13), limits, TEXT_FAINT,
                       (rect.right - 10, rect.top + 9), align="right")
@@ -500,7 +512,7 @@ class MonitorUI:
 
         # Corazon que late
         if time.monotonic() - self._last_beat_flash < 0.18:
-            draw_heart(self.screen, (rect.left + 26, rect.bottom - 30), 22, color)
+            draw_heart(self.screen, (rect.left + 32, rect.bottom - 30), 22, color)
 
         detail = []
         if snapshot.rr_last_ms is not None:
@@ -509,7 +521,7 @@ class MonitorUI:
             detail.append(f"RMSSD {snapshot.hrv_rmssd_ms:.0f}")
         if detail:
             blit_text(self.screen, self.fonts.sans(13), "   ".join(detail), TEXT_DIM,
-                      (rect.left + 48, rect.bottom - 34))
+                      (rect.left + 54, rect.bottom - 34))
 
     def _draw_spo2_box(self, rect: pygame.Rect, snapshot) -> None:
         limits = self.cfg.alarms
@@ -525,29 +537,29 @@ class MonitorUI:
             label = "ultima medicion" if snapshot.spo2_pct is not None \
                 else "sensor apagado"
             blit_text(self.screen, self.fonts.sans(14), label, TEXT_FAINT,
-                      (rect.left + 10, rect.bottom - 30))
+                      (rect.left + 16, rect.bottom - 30))
         elif not snapshot.finger_detected:
             blit_text(self.screen, self.fonts.sans(14, bold=True), "SIN DEDO",
-                      ALARM_MEDIUM, (rect.left + 10, rect.bottom - 30))
+                      ALARM_MEDIUM, (rect.left + 16, rect.bottom - 30))
         elif snapshot.perfusion_index is not None:
             blit_text(self.screen, self.fonts.sans(14),
                       f"PI {snapshot.perfusion_index:.1f} %", TEXT_DIM,
-                      (rect.left + 10, rect.bottom - 30))
+                      (rect.left + 16, rect.bottom - 30))
 
     def _draw_pr_box(self, rect: pygame.Rect, snapshot) -> None:
         """Frecuencia de pulso: el latido que de verdad llega al dedo."""
-        self._box_frame(rect, "PR", "lpm", PLETH, source="MAX30102 · pleth")
-        self._big_number(rect, snapshot.pr_bpm, PLETH, size=64)
+        self._box_frame(rect, "PR", "lpm", PULSE, source="MAX30102 · pleth")
+        self._big_number(rect, snapshot.pr_bpm, PULSE, size=64)
 
         # Punto que destella con cada pulso detectado. Sirve para comprobar a
         # ojo que el numero se corresponde con la onda del pleth: si destella
         # dos veces por cada pico de la onda, el detector esta contando de mas.
         if time.monotonic() - self._last_pulse_flash < 0.18:
-            pygame.draw.circle(self.screen, PLETH,
-                               (rect.left + 26, rect.bottom - 30), 9)
+            pygame.draw.circle(self.screen, PULSE,
+                               (rect.left + 32, rect.bottom - 30), 9)
         else:
             pygame.draw.circle(self.screen, PANEL_BORDER,
-                               (rect.left + 26, rect.bottom - 30), 9, 1)
+                               (rect.left + 32, rect.bottom - 30), 9, 1)
 
         deficit = snapshot.pulse_deficit
         if deficit is not None:
@@ -556,7 +568,7 @@ class MonitorUI:
             color = ALARM_MEDIUM if abs(deficit) >= 8 else TEXT_DIM
             blit_text(self.screen, self.fonts.sans(13),
                       f"FC - PR = {deficit:+d}", color,
-                      (rect.left + 10, rect.bottom - 30))
+                      (rect.left + 16, rect.bottom - 30))
 
     def _draw_resp_box(self, rect: pygame.Rect, snapshot) -> None:
         limits = self.cfg.alarms
@@ -569,7 +581,7 @@ class MonitorUI:
         # medicion directa: no hay sensor de flujo ni de impedancia toracica.
         self._big_number(rect, snapshot.resp_rpm, color, size=60, prefix="~")
         blit_text(self.screen, self.fonts.sans(12, bold=True), "ESTIMADA", TEXT_FAINT,
-                  (rect.left + 10, rect.bottom - 30))
+                  (rect.left + 16, rect.bottom - 30))
 
     def _draw_footer(self, snapshot) -> None:
         top = self.height - self.footer_h
@@ -811,7 +823,7 @@ class MonitorUI:
         rows = [
             ("FC", summary.hr, ECG, 0),
             ("SpO2", summary.spo2, PLETH, 1),
-            ("PR", summary.pr, PLETH, 0),
+            ("PR", summary.pr, PULSE, 0),
             ("PI", summary.perfusion, PLETH, 2),
             ("RESP", summary.resp, RESP, 0),
         ]

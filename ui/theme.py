@@ -12,6 +12,10 @@ import pygame
 BG = (4, 6, 12)
 PANEL_BG = (9, 13, 22)
 PANEL_BORDER = (28, 40, 60)
+# Separador entre las cajas de numeros. Tiene que verse: si no se distingue
+# donde termina una caja y empieza la otra, el ojo asocia cada numero con el
+# rotulo equivocado, porque el rotulo va arriba y el numero al medio.
+BOX_BORDER = (62, 84, 112)
 HEADER_BG = (12, 20, 34)
 
 GRID_MINOR = (18, 42, 62)
@@ -19,6 +23,10 @@ GRID_MAJOR = (32, 70, 100)
 
 ECG = (32, 245, 92)
 PLETH = (0, 226, 255)
+# El pulso va en un tono distinto del SpO2 a proposito, aunque los dos salgan
+# del MAX30102: son los dos numeros que mas se confunden entre si, y compartir
+# color hace que se confundan mas.
+PULSE = (140, 170, 255)
 RESP = (255, 214, 0)
 ART = (255, 60, 60)
 
