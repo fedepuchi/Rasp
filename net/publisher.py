@@ -93,6 +93,15 @@ def build_payload(device: str, timestamp: float, variable: str,
     }
 
 
+class PublisherConfigError(RuntimeError):
+    """Falta algo para poder publicar (la CA, paho, credenciales).
+
+    Nunca tumba el monitor: la pantalla es la funcion principal y no puede
+    depender de que el broker este bien configurado. Se avisa, se apaga la
+    publicacion y se sigue dibujando.
+    """
+
+
 @dataclass
 class PublisherStatus:
     enabled: bool = False
@@ -166,11 +175,11 @@ class Publisher:
         error de paho cuando el archivo no existe no dice cual falta.
         """
         if not Path(iot_env.MQTT_CA_FILE).is_file():
-            raise SystemExit(
-                f"[mqtt] no se encuentra la CA del broker en {iot_env.MQTT_CA_FILE}.\n"
-                "        Copiala desde infra/mosquitto/certs/ca.crt (la genera\n"
-                "        infra/mosquitto/gen-certs.sh) o apunta MQTT_CA_FILE al\n"
-                "        archivo correcto. Si el broker no usa TLS, MQTT_TLS=false."
+            raise PublisherConfigError(
+                f"no se encuentra la CA del broker en {iot_env.MQTT_CA_FILE}.\n"
+                "       Copiala desde infra/mosquitto/certs/ca.crt (la genera\n"
+                "       infra/mosquitto/gen-certs.sh) o apunta MQTT_CA_FILE al\n"
+                "       archivo correcto. Si el broker no usa TLS: MQTT_TLS=false"
             )
 
         client.tls_set(
@@ -231,10 +240,23 @@ class Publisher:
                 "       solo queres la pantalla."
             )
 
-        self._buffer = Buffer(self.cfg.buffer_path, self.cfg.buffer_max_rows)
-        self.status.pending_readings = self._buffer.count()
-
-        self._client = self._build_client()
+        try:
+            self._buffer = Buffer(self.cfg.buffer_path, self.cfg.buffer_max_rows)
+            self.status.pending_readings = self._buffer.count()
+            self._client = self._build_client()
+        except (PublisherConfigError, OSError) as exc:
+            # Cualquier problema de configuracion apaga SOLO la publicacion. El
+            # monitor tiene que arrancar igual: la pantalla es lo principal y no
+            # puede quedarse negra porque falte un certificado.
+            self.cfg.enabled = False
+            self.status.enabled = False
+            self.status.last_error = str(exc).splitlines()[0][:110]
+            print(f"[mqtt] no se puede publicar: {exc}")
+            print("       El monitor sigue funcionando, pero sin mandar nada.")
+            if self._buffer is not None:
+                self._buffer.close()
+                self._buffer = None
+            return
         # connect_async + loop_start no bloquean: el monitor arranca aunque el
         # broker este caido, y las lecturas se van al buffer.
         self._client.connect_async(self.cfg.host, self.cfg.port, keepalive=30)
