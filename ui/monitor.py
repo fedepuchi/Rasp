@@ -629,7 +629,6 @@ class MonitorUI:
         """Diagnostico del equipo. Nada de esto es un signo vital del paciente."""
         lines = [
             "-- equipo (no es del paciente) --",
-            f"temp del die MAX30102  {_fmt(snapshot.sensor_die_temp_c, 1, 'C')}",
             f"base AD8232            {_fmt(snapshot.ecg_baseline_v, 3, 'V')}",
             f"  (deberia dar ~{self.cfg.ecg.supply_volts / 2:.2f} V)",
             f"saturacion ECG         {'SI' if snapshot.ecg_saturated else 'no'}",

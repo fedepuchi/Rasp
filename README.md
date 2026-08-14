@@ -39,13 +39,13 @@ signos vitales del paciente.
 |---|---|---|
 | **AD8232** | un canal de ECG analogico + LO+/LO- de electrodo suelto | traza de ECG, **FC**, intervalo R-R, RMSSD de corto plazo |
 | **ADS1115** | nada propio: es el conversor A/D del AD8232 | digitaliza el ECG y avisa si la senial satura |
-| **MAX30102** | luz roja e infrarroja reflejada, y la temperatura de su propio chip | pletismografia, **SpO2**, **PR**, **indice de perfusion** |
+| **MAX30102** | luz roja e infrarroja reflejada | pletismografia, **SpO2**, **PR**, **indice de perfusion** |
 
 **Lo que este equipo no mide**, y por eso no aparece como signo vital:
 temperatura corporal, presion arterial, capnografia, y respiracion por
 impedancia toracica o por flujo.
 
-Dos casos de frontera, marcados en la pantalla en vez de disimulados:
+Un caso de frontera, marcado en la pantalla en vez de disimulado:
 
 - **RESP** sale de como la respiracion mueve la linea de base del
   pletismografo. **No hay ningun sensor de respiracion en este equipo**: es una
@@ -54,11 +54,6 @@ Dos casos de frontera, marcados en la pantalla en vez de disimulados:
   configuracion lo saca junto con su carril.
   Como funciona, que la ensucia y que habria que agregar para medirla de verdad:
   **[docs/respiracion.md](docs/respiracion.md)**.
-- **La temperatura del MAX30102** es la de su propio chip, que el fabricante
-  expone para compensar la deriva de los LED. No tiene nada que ver con la
-  temperatura del paciente, asi que **no esta en el panel de signos vitales**:
-  vive en el panel de diagnostico (tecla `D`) junto al resto de la salud del
-  equipo.
 
 Un par de aclaraciones sobre precision, para que nadie lea de mas:
 
@@ -276,8 +271,7 @@ La cuenta completa de por que hacen falta esos segundos esta en
 | `session.power_down_idle` | `false` deja los modulos encendidos entre mediciones |
 
 Apagar los modulos entre mediciones no es solo consumo: el MAX30102 con los LED
-encendidos se entibia, y si queda prendido con el dedo puesto un rato largo, esa
-temperatura termina en la lectura.
+encendidos se entibia, y un sensor caliente deriva.
 
 Cada medicion terminada se manda al backend como un mensaje `measurement` con
 el resumen completo. Es el mensaje mas comodo para armar historial: una fila

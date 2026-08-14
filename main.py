@@ -185,10 +185,9 @@ def main() -> int:
     ui.session = measurement if cfg.session.manual else None
 
     def on_measurement_start() -> None:
-        nonlocal ecg_proc, ppg_proc, snapshot, last_temp
+        nonlocal ecg_proc, ppg_proc, snapshot
         ecg_proc, ppg_proc = make_processors()
         snapshot = VitalsSnapshot()
-        last_temp = None
         ui.clear_traces()
         alarms.clear()
 
@@ -220,7 +219,6 @@ def main() -> int:
 
     started_at = time.time()
     snapshot = VitalsSnapshot()
-    last_temp = None
     exit_reason = "shutdown"
 
     try:
@@ -261,9 +259,6 @@ def main() -> int:
 
                 ecg_proc.tick()
                 ppg_proc.tick()
-                if acquisition.ppg.die_temp_c is not None:
-                    last_temp = acquisition.ppg.die_temp_c
-
                 # ---- signos vitales ----
                 snapshot.hr_bpm = ecg_proc.hr_bpm
                 snapshot.pr_bpm = ppg_proc.pr_bpm
@@ -277,7 +272,6 @@ def main() -> int:
                 snapshot.finger_detected = ppg_proc.finger_detected
                 snapshot.spo2_out_of_range = ppg_proc.out_of_range
                 # Diagnostico del equipo, no del paciente
-                snapshot.sensor_die_temp_c = last_temp
                 snapshot.ecg_baseline_v = ecg_proc.baseline_v
                 snapshot.ir_dc = ppg_proc.ir_dc_value or None
                 snapshot.red_dc = ppg_proc.red_dc_value or None

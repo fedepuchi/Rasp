@@ -37,9 +37,6 @@ REG_MODE_CONFIG = 0x09
 REG_SPO2_CONFIG = 0x0A
 REG_LED1_PA = 0x0C  # rojo
 REG_LED2_PA = 0x0D  # infrarrojo
-REG_TEMP_INT = 0x1F
-REG_TEMP_FRAC = 0x20
-REG_TEMP_CONFIG = 0x21
 REG_REV_ID = 0xFE
 REG_PART_ID = 0xFF
 
@@ -277,23 +274,3 @@ class MAX30102:
         el sensor esta llenando la FIFO de verdad.
         """
         return self._read(REG_INTR_STATUS_1), self._read(REG_INTR_STATUS_2)
-
-    def read_temperature(self) -> float:
-        """Temperatura del die, no del paciente. Sirve para compensar el LED."""
-        # Limpiamos interrupciones viejas y pedimos una conversion
-        self._read(REG_INTR_STATUS_2)
-        self._write(REG_TEMP_CONFIG, 0x01)
-        # OJO: el bit TEMP_EN se autolimpia apenas arranca la conversion, no
-        # cuando termina. Esperarlo a el devuelve 0.0 siempre. Lo que hay que
-        # esperar es DIE_TEMP_RDY del registro de interrupciones; la conversion
-        # tarda unos 29 ms.
-        deadline = time.monotonic() + 0.25
-        while time.monotonic() < deadline:
-            if self._read(REG_INTR_STATUS_2) & 0x02:
-                break
-            time.sleep(0.005)
-        integer = self._read(REG_TEMP_INT)
-        if integer > 127:
-            integer -= 256
-        frac = self._read(REG_TEMP_FRAC) & 0x0F
-        return integer + frac * 0.0625

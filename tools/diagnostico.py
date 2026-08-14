@@ -147,11 +147,6 @@ def probar_max30102(cfg: Config, segundos: float) -> None:
     except OSError as exc:
         falla(f"se corto la lectura: {exc}")
 
-    temperatura = None
-    try:
-        temperatura = sensor.read_temperature()
-    except OSError:
-        pass
     sensor.shutdown()
 
     print()
@@ -196,8 +191,6 @@ def probar_max30102(cfg: Config, segundos: float) -> None:
 
     _probar_orientacion_leds(cfg, rojo, ir, sensor.output_rate_hz)
 
-    if temperatura is not None:
-        ok(f"temperatura del chip {temperatura:.1f} C (del chip, NO del paciente)")
     if cfg.ppg.int_pin is not None and pin_int.available:
         if pin_int.pulses:
             ok(f"INT aviso {pin_int.pulses} veces en GPIO{cfg.ppg.int_pin}")

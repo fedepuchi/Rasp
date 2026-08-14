@@ -192,12 +192,10 @@ class PpgThread(_PacedThread):
         self._sensor: MAX30102 | None = None
         self._sim: PpgSimulator | None = None
         self._int: DataReadyPin | None = None
-        self.die_temp_c: float | None = None
 
     def setup(self) -> None:
         if self.cfg.demo:
             self._sim = PpgSimulator(self.fs)
-            self.die_temp_c = 30.2  # el MAX30102 tibio, como en la realidad
             return
         self._sensor = MAX30102(
             bus=self.cfg.ppg.i2c_bus,
@@ -229,7 +227,6 @@ class PpgThread(_PacedThread):
 
     def run(self) -> None:
         next_t = time.monotonic()
-        temp_at = 0.0
         pending = 0.0  # muestras fraccionarias acumuladas en modo demo
 
         while not self._stop.is_set():
@@ -247,10 +244,6 @@ class PpgThread(_PacedThread):
                     red, ir = self._sim.block(n)
                 else:
                     red, ir = self._sensor.read_fifo()
-                    now = time.monotonic()
-                    if now >= temp_at:
-                        self.die_temp_c = self._sensor.read_temperature()
-                        temp_at = now + 5.0
             except OSError as exc:
                 self.error = f"I2C PPG: {exc}"
                 time.sleep(0.25)

@@ -1,12 +1,12 @@
 """Foto del estado del monitor en un instante.
 
-Es la unica estructura que comparten la UI, las alarmas y el cliente HTTP, asi
+Es la unica estructura que comparten la UI, las alarmas y el publicador, asi
 que si se agrega un signo vital nuevo se toca aca y ya lo ven los tres.
 
 Regla de oro de este archivo: en `vitals` solo van magnitudes que **estos tres
-modulos pueden medir de verdad**. Lo que es del equipo y no del paciente (la
-temperatura del die del MAX30102, el offset de continua del AD8232, el nivel de
-continua de los LED) va en `diagnostics`, que es otra cosa y se muestra aparte.
+modulos pueden medir de verdad**. Lo que es del equipo y no del paciente (el
+offset de continua del AD8232, el nivel de continua de los LED) va en
+`diagnostics`, que es otra cosa y se muestra aparte.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ class VitalsSnapshot:
     seconds_since_beat: float = 999.0
 
     # -- diagnostico del equipo, NO del paciente --
-    sensor_die_temp_c: float | None = None  # temperatura del chip MAX30102
     ecg_baseline_v: float | None = None     # continua del AD8232, deberia dar ~VCC/2
     ir_dc: float | None = None              # nivel de continua del LED infrarrojo
     red_dc: float | None = None             # idem del LED rojo
@@ -97,7 +96,6 @@ class VitalsSnapshot:
     def diagnostics_json(self) -> dict:
         """Salud del equipo. Nada de esto es un signo vital."""
         return {
-            "sensor_die_temp_c": _round(self.sensor_die_temp_c, 1),
             "ecg_baseline_v": _round(self.ecg_baseline_v, 3),
             "ir_dc": _round(self.ir_dc, 0),
             "red_dc": _round(self.red_dc, 0),

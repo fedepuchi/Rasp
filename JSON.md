@@ -112,9 +112,8 @@ del monitor siguen sonando en el Pi. Los limites de `resp` son los mismos en los
 dos lados a proposito, para que no digan cosas distintas.
 
 **La calidad de senial y el diagnostico del equipo.** Electrodo suelto,
-saturacion del ECG, temperatura del chip, nivel de los LED: nada de eso tiene
-lugar en el payload. Vive en la pantalla, en la tecla `D` y en
-`tools/diagnostico.py`.
+saturacion del ECG, nivel de los LED: nada de eso tiene lugar en el payload.
+Vive en la pantalla, en la tecla `D` y en `tools/diagnostico.py`.
 
 ---
 
