@@ -1,142 +1,148 @@
-"""Receptor de prueba: NO es el backend, es para ver que llega el JSON.
+"""Receptor de prueba: NO es el backend, es para ver que sale la telemetria.
 
-Levanta un servidor HTTP con la libreria estandar (cero dependencias) que
-acepta el POST del monitor, imprime un resumen y opcionalmente guarda todo en
-un archivo .jsonl para revisarlo despues.
+Se suscribe a los mismos temas que `backend/src/services/mqttIngest.ts` y va
+imprimiendo lo que publica el monitor. Sirve para separar "el Pi no publica" de
+"el backend no guarda" sin tener que levantar todo el Compose.
 
-    python tools/receptor_prueba.py --port 8000 --guardar datos.jsonl
+    python tools/receptor_prueba.py
+    python tools/receptor_prueba.py --host 192.168.0.50 --guardar datos.jsonl
+    python tools/receptor_prueba.py --sin-tls --puerto 1883   # broker de juguete
 
-Despues, en el Pi:
-    python main.py --backend http://IP_DE_ESTA_PC:8000
+Toma el broker, el usuario y la CA del mismo sitio que el monitor (iot_env), asi
+que si el monitor llega, esto tambien.
 """
 
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
-import socket
+import os
+import ssl
+import sys
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import iot_env  # noqa: E402
+
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:
+    raise SystemExit("Falta paho-mqtt.  pip install paho-mqtt")
 
 ARCHIVO = None
-VERBOSE = False
+CONTADOR = {"telemetry": 0, "status": 0, "invalidos": 0}
 
 
-class Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def do_POST(self) -> None:  # noqa: N802 (lo pide BaseHTTPRequestHandler)
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
-        if self.headers.get("Content-Encoding") == "gzip":
-            body = gzip.decompress(body)
-
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError as exc:
-            print(f"  !! JSON invalido: {exc}")
-            self._reply(400, {"error": "json invalido"})
-            return
-
-        # Un error imprimiendo no tiene que parecer una caida de red: sin este
-        # try, una excepcion aca cierra la conexion y el Pi reporta "sin
-        # servidor" cuando en realidad el POST llego perfecto.
-        try:
-            self._describe(payload, len(body))
-        except Exception as exc:
-            print(f"  !! error mostrando el mensaje: {exc!r}", flush=True)
-
-        if ARCHIVO is not None:
-            for message in payload.get("messages", [payload]):
-                ARCHIVO.write(json.dumps(message, ensure_ascii=False) + "\n")
-            ARCHIVO.flush()
-
-        self._reply(200, {"ok": True, "recibidos": len(payload.get("messages", []))})
-
-    def do_GET(self) -> None:  # noqa: N802
-        self._reply(200, {"ok": True, "servicio": "receptor de prueba"})
-
-    def _reply(self, code: int, data: dict) -> None:
-        body = json.dumps(data).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _describe(self, payload: dict, size: int) -> None:
-        messages = payload.get("messages", [])
-        stamp = time.strftime("%H:%M:%S")
-        kinds: dict[str, int] = {}
-        for message in messages:
-            kinds[message.get("type", "?")] = kinds.get(message.get("type", "?"), 0) + 1
-        resumen = " ".join(f"{k}x{v}" for k, v in sorted(kinds.items()))
-        print(f"[{stamp}] {payload.get('device_id')}  {size/1024:6.1f} kB  {resumen}",
-              flush=True)
-
-        for message in messages:
-            if message.get("type") == "vitals":
-                # .get() en vez de [] a proposito: si el contrato agrega o
-                # renombra un campo, el receptor tiene que seguir andando.
-                v = message.get("vitals", {})
-                alarmas = [a["code"] for a in message.get("alarms", [])]
-                print(f"           FC {_f(v.get('hr_bpm'))}  "
-                      f"SpO2 {_f(v.get('spo2_pct'))}  "
-                      f"PR {_f(v.get('pr_bpm'))}  "
-                      f"RESP ~{_f(v.get('resp_rpm_estimated'))}  "
-                      f"PI {_f(v.get('perfusion_index'))}"
-                      + (f"  ALARMAS: {', '.join(alarmas)}" if alarmas else ""),
-                      flush=True)
-            elif message.get("type") == "waveform" and VERBOSE:
-                for wave in message.get("waveforms", []):
-                    print(f"           onda {wave['name']:6s} "
-                          f"{wave['n']:4d} muestras @ {wave['fs_hz']} Hz", flush=True)
-            elif message.get("type") in ("session_start", "session_end", "event"):
-                print(f"           {json.dumps(message, ensure_ascii=False)[:400]}",
-                      flush=True)
-
-    def log_message(self, *args) -> None:
-        pass  # silenciamos el log por defecto, que es ruidoso
+def al_conectar(client, userdata, flags, reason_code, properties=None):
+    if reason_code != 0:
+        print(f"[mqtt] conexion rechazada: {reason_code}")
+        return
+    temas = [(userdata["telemetry"], 1), (userdata["status"], 1)]
+    client.subscribe(temas)
+    print(f"[mqtt] conectado. Escuchando:")
+    for tema, _ in temas:
+        print(f"         {tema}")
+    print()
 
 
-def _f(value) -> str:
-    return "---" if value is None else str(value)
-
-
-def ip_local() -> str:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def al_recibir(client, userdata, msg):
+    stamp = time.strftime("%H:%M:%S")
     try:
-        sock.connect(("8.8.8.8", 80))
-        return sock.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        sock.close()
+        payload = json.loads(msg.payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        CONTADOR["invalidos"] += 1
+        print(f"[{stamp}] {msg.topic}  !! no es JSON valido", flush=True)
+        return
+
+    if msg.topic.endswith("/status"):
+        CONTADOR["status"] += 1
+        estado = payload.get("status")
+        marca = "RETENIDO" if msg.retain else ""
+        print(f"[{stamp}] ESTADO  {payload.get('device')}  {estado}  {marca}",
+              flush=True)
+    else:
+        CONTADOR["telemetry"] += 1
+        print(f"[{stamp}] {payload.get('variable'):<10} "
+              f"{payload.get('value'):>8} {payload.get('unit'):<4} "
+              f"ts={payload.get('ts'):.3f}  {payload.get('hash', '')[:12]}...",
+              flush=True)
+        _validar(payload)
+
+    if ARCHIVO is not None:
+        ARCHIVO.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        ARCHIVO.flush()
+
+
+def _validar(payload: dict) -> None:
+    """Las mismas comprobaciones que hace `telemetrySchema` con zod.
+
+    Vale la pena repetirlas aca: si el payload no valida, el backend lo tira con
+    un warning en su log y desde el Pi no se nota nada.
+    """
+    problemas = []
+    for campo in ("device", "variable", "value", "unit", "ts", "hash"):
+        if campo not in payload:
+            problemas.append(f"falta '{campo}'")
+    if isinstance(payload.get("hash"), str) and len(payload["hash"]) != 64:
+        problemas.append(f"hash de {len(payload['hash'])} caracteres, tienen que ser 64")
+    if not isinstance(payload.get("value"), (int, float)):
+        problemas.append("value no es numero")
+    if isinstance(payload.get("device"), str) and len(payload["device"]) > 50:
+        problemas.append("device de mas de 50 caracteres")
+    if problemas:
+        CONTADOR["invalidos"] += 1
+        print(f"           !! el backend lo va a rechazar: {', '.join(problemas)}",
+              flush=True)
 
 
 def main() -> None:
-    global ARCHIVO, VERBOSE
-    parser = argparse.ArgumentParser(description="Receptor de prueba del monitor")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--guardar", metavar="ARCHIVO.jsonl",
-                        help="guarda cada mensaje en un archivo jsonl")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="tambien muestra las ondas")
+    global ARCHIVO
+    parser = argparse.ArgumentParser(description="Receptor MQTT de prueba")
+    parser.add_argument("--host", default=iot_env.MQTT_HOST)
+    parser.add_argument("--puerto", type=int, default=iot_env.MQTT_PORT)
+    parser.add_argument("--device", default="+",
+                        help="codigo del dispositivo, o + para escuchar todos")
+    parser.add_argument("--sin-tls", action="store_true",
+                        help="broker sin TLS (SIAPPC no acepta esto)")
+    parser.add_argument("--guardar", metavar="ARCHIVO.jsonl")
     args = parser.parse_args()
 
-    VERBOSE = args.verbose
     if args.guardar:
         ARCHIVO = open(args.guardar, "a", encoding="utf-8")
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"Escuchando en http://{ip_local()}:{args.port}/api/v1/ingest")
-    print("En el Pi:  python main.py --backend http://%s:%d\n" % (ip_local(), args.port))
+    userdata = {
+        "telemetry": iot_env.telemetry_topic(args.device),
+        "status": iot_env.status_topic(args.device),
+    }
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                         client_id="receptor-prueba", userdata=userdata)
+    if iot_env.MQTT_USER:
+        client.username_pw_set(iot_env.MQTT_USER, iot_env.MQTT_PASSWORD)
+
+    if not args.sin_tls and iot_env.MQTT_TLS:
+        if not Path(iot_env.MQTT_CA_FILE).is_file():
+            raise SystemExit(
+                f"No se encuentra la CA en {iot_env.MQTT_CA_FILE}.\n"
+                "Copiala desde infra/mosquitto/certs/ca.crt, o usa --sin-tls "
+                "contra un broker de juguete.")
+        client.tls_set(ca_certs=iot_env.MQTT_CA_FILE,
+                       certfile=iot_env.MQTT_CLIENT_CERT_FILE,
+                       keyfile=iot_env.MQTT_CLIENT_KEY_FILE,
+                       cert_reqs=ssl.CERT_REQUIRED,
+                       tls_version=ssl.PROTOCOL_TLS_CLIENT)
+
+    client.on_connect = al_conectar
+    client.on_message = al_recibir
+
+    print(f"Conectando a {args.host}:{args.puerto}...")
+    client.connect(args.host, args.puerto, keepalive=30)
     try:
-        server.serve_forever()
+        client.loop_forever()
     except KeyboardInterrupt:
-        print("\nChau")
+        print(f"\nRecibidos: {CONTADOR['telemetry']} lecturas, "
+              f"{CONTADOR['status']} de estado, {CONTADOR['invalidos']} invalidos")
     finally:
         if ARCHIVO is not None:
             ARCHIVO.close()

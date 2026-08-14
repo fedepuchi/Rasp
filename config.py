@@ -4,7 +4,11 @@ Todo lo que se toca sin abrir el resto del codigo vive aca. Se puede pisar con
 un archivo JSON (--config mi_config.json) o con variables de entorno MONITOR_*.
 
 Ejemplo de override por entorno:
-    MONITOR_BACKEND_URL=http://192.168.0.50:8000 python main.py
+    MONITOR_BROKER_HOST=192.168.0.50 python main.py
+
+Lo del broker (host, usuario, contrasena, CA) NO vive aca: sale del entorno o de
+un `.env` a traves de `iot_env.py`, para que la contrasena este en un solo sitio
+y `--save-config` no la escriba en un JSON.
 """
 
 from __future__ import annotations
@@ -14,6 +18,8 @@ import os
 import socket
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from typing import Any
+
+import iot_env
 
 
 # --------------------------------------------------------------------------
@@ -115,30 +121,34 @@ class RespConfig:
 
 @dataclass
 class BackendConfig:
-    """Cliente HTTP que manda el JSON al backend en la misma WiFi."""
+    """Publicacion por MQTT hacia el backend de SIAPPC.
+
+    Antes esto armaba un sobre `monitor.v1` y lo mandaba por HTTP a
+    `POST /api/v1/ingest`. Ese endpoint no existe: la telemetria de SIAPPC entra
+    por MQTT, en `siappc/<dispositivo>/telemetry`, y la consume
+    `backend/src/services/mqttIngest.ts`. El contrato esta en JSON.md.
+
+    Aca solo esta *que* se publica y *cada cuanto*. El host, el usuario, la
+    contrasena y la CA del broker salen del entorno o de `iot/.env` (ver
+    `iot_env.py`): asi hay un solo sitio donde vive la contrasena y
+    `--save-config` no la escribe en un JSON.
+    """
 
     enabled: bool = True
-    # Sin barra final. Puede ser IP directa o hostname .local
-    url: str = "http://192.168.0.100:8000"
-    ingest_path: str = "/api/v1/ingest"
-    api_key: str | None = None  # se manda como header X-API-Key si no es None
-    timeout_s: float = 3.0
-    # Cada cuanto se manda cada tipo de mensaje
-    vitals_interval_s: float = 1.0
-    waveform_interval_s: float = 0.25
-    # Cuantos mensajes se agrupan por POST
-    batch_max_messages: int = 8
-    # Cuantos lotes se guardan en RAM si se cae la WiFi (se descartan los mas viejos)
-    offline_buffer_batches: int = 600
-    # Reintento con backoff exponencial
-    retry_base_s: float = 0.5
-    retry_max_s: float = 15.0
-    # Diezmado de la onda de ECG antes de mandarla (1 = manda todo)
-    ecg_send_decimation: int = 1
-    verify_tls: bool = True
-    # Comprime el cuerpo con gzip si supera estos bytes (0 = nunca).
-    # Solo activalo si el backend entiende Content-Encoding: gzip.
-    gzip_over_bytes: int = 0
+    # Por defecto lo que diga el entorno. Estan aca (y no solo en iot_env) para
+    # poder apuntar el monitor a otro broker sin tocar el .env compartido.
+    host: str = field(default_factory=lambda: iot_env.MQTT_HOST)
+    port: int = field(default_factory=lambda: iot_env.MQTT_PORT)
+    # Cada cuanto se publica una tanda de signos vitales. Son hasta 5 filas en
+    # `lectura` por tanda (hr, spo2, pr, perfusion, resp).
+    vitals_interval_s: float = field(default_factory=lambda: iot_env.PUBLISH_INTERVAL)
+    # QoS 1: el broker confirma la entrega. Los duplicados que eso pueda generar
+    # los descarta el backend por el hash de la lectura.
+    qos: int = 1
+    # Cola local en SQLite. Si el broker no esta, las lecturas se acumulan aca y
+    # salen al reconectar.
+    buffer_path: str = field(default_factory=iot_env.monitor_buffer_path)
+    buffer_max_rows: int = field(default_factory=lambda: iot_env.BUFFER_MAX_ROWS)
 
 
 @dataclass
@@ -167,7 +177,10 @@ class SessionConfig:
 
 @dataclass
 class DeviceConfig:
-    device_id: str = field(default_factory=lambda: f"rpi-{socket.gethostname()}")
+    # Tiene que coincidir con `dispositivo.codigo` en la base de SIAPPC. Si el
+    # backend no lo encuentra ahi descarta las lecturas, porque no sabe a que
+    # hospital colgarlas. Sale de DEVICE_CODE, el mismo que usa `iot/src/`.
+    device_id: str = field(default_factory=lambda: iot_env.DEVICE_CODE)
     patient_id: str = "ANON-001"
     patient_name: str = "PACIENTE DE PRUEBA"
     bed: str = "CAMA 1"
@@ -268,9 +281,9 @@ def _merge(target: Any, data: dict[str, Any]) -> None:
 
 # Solo se exponen por entorno las cosas que uno cambia al desplegar.
 _ENV_MAP = {
-    "MONITOR_BACKEND_URL": ("backend", "url", str),
+    "MONITOR_BROKER_HOST": ("backend", "host", str),
+    "MONITOR_BROKER_PORT": ("backend", "port", int),
     "MONITOR_BACKEND_ENABLED": ("backend", "enabled", lambda v: v.lower() in ("1", "true", "si", "yes")),
-    "MONITOR_API_KEY": ("backend", "api_key", str),
     "MONITOR_DEVICE_ID": ("device", "device_id", str),
     "MONITOR_PATIENT": ("device", "patient_name", str),
     "MONITOR_FULLSCREEN": ("ui", "fullscreen", lambda v: v.lower() in ("1", "true", "si", "yes")),

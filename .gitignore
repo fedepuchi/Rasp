@@ -22,3 +22,9 @@ capturas/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Credenciales del broker: nunca al repositorio
+.env
+certs/
+*.db
+monitor-buffer.db

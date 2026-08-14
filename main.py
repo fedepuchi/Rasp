@@ -2,12 +2,12 @@
 
     MAX30102 (SpO2/pulso) + AD8232 (ECG) -> ADS1115 -> Raspberry Pi
         -> pantalla estilo monitor de cabecera (pygame)
-        -> JSON por HTTP a un backend en la misma red
+        -> JSON por MQTT al backend de SIAPPC (ver JSON.md)
 
 Uso tipico:
     python main.py                          # con hardware
     python main.py --demo --windowed        # para probar en la PC
-    python main.py --backend http://192.168.0.50:8000
+    python main.py --broker 192.168.0.50     # host del broker MQTT
     python main.py --save-config config.json    # escribe la config por defecto
 
 AVISO: esto no es un equipo medico ni esta certificado. Sirve para aprender,
@@ -51,10 +51,12 @@ def parse_args() -> argparse.Namespace:
                         help="seniales simuladas, sin hardware")
     parser.add_argument("--windowed", action="store_true",
                         help="en ventana en vez de pantalla completa")
-    parser.add_argument("--backend", metavar="URL",
-                        help="URL del backend (ej: http://192.168.0.50:8000)")
+    parser.add_argument("--broker", metavar="HOST",
+                        help="host del broker MQTT (ej: 192.168.0.50)")
+    parser.add_argument("--puerto-broker", type=int, metavar="PUERTO",
+                        help="puerto del broker (default 8883, que es el de TLS)")
     parser.add_argument("--no-backend", action="store_true",
-                        help="no manda nada por red")
+                        help="no publica nada: solo la pantalla")
     parser.add_argument("--no-sound", action="store_true")
     parser.add_argument("--continuo", action="store_true",
                         help="mide siempre, sin esperar la tecla")
@@ -80,9 +82,11 @@ def build_config(args: argparse.Namespace) -> Config:
         cfg.demo = True
     if args.windowed:
         cfg.ui.fullscreen = False
-    if args.backend:
-        cfg.backend.url = args.backend
+    if args.broker:
+        cfg.backend.host = args.broker
         cfg.backend.enabled = True
+    if args.puerto_broker:
+        cfg.backend.port = args.puerto_broker
     if args.no_backend:
         cfg.backend.enabled = False
     if args.no_sound:
@@ -166,25 +170,13 @@ def main() -> int:
 
     # -- red ---------------------------------------------------------------
     publisher = Publisher(cfg)
-    publisher.register_channel(
-        "ecg", "mV", ecg_fs, scale=0.001,
-        decimation=cfg.backend.ecg_send_decimation,
-        note=f"AD8232 -> ADS1115. mV nominales con ganancia {cfg.ecg.frontend_gain:g}, sin calibrar",
-    )
-    publisher.register_channel(
-        "pleth", "raw", ppg_fs, scale=1.0,
-        note="MAX30102, canal infrarrojo filtrado. Cuentas del ADC, sin unidad fisica",
-    )
-    if cfg.resp.enabled:
-        publisher.register_channel(
-            "resp", "raw", ppg_fs / max(1, round(ppg_fs / cfg.resp.fs_hz)), scale=0.1,
-            note="estimada de como la respiracion mueve la linea de base del pleth",
-        )
+    # Las ondas no se registran: el backend guarda una fila por lectura en
+    # `lectura` y el ECG son 250 muestras por segundo. Se dibujan y ya.
     publisher.start()
     publisher.session_start()
 
     if cfg.backend.enabled:
-        print(f"[red] mandando JSON a {publisher.endpoint}")
+        print(f"[red] publicando en {publisher.destination}")
     else:
         print("[red] envio deshabilitado")
 
@@ -253,7 +245,6 @@ def main() -> int:
                     millivolts, beats = ecg_proc.process(chunk.values)
                     if recording:
                         ui.push_ecg(millivolts)
-                        publisher.add_samples("ecg", millivolts, chunk.t0)
                         for _ in range(beats):
                             ui.on_beat(ppg_proc.spo2)
                             measurement.note_beat()
@@ -264,9 +255,6 @@ def main() -> int:
                     if recording:
                         ui.push_pleth(pleth)
                         ui.push_resp(resp)
-                        publisher.add_samples("pleth", pleth, chunk.t0)
-                        if resp:
-                            publisher.add_samples("resp", resp, chunk.t0)
                         if pulses:
                             ui.on_pulse()
                     ui.set_finger_off(not ppg_proc.finger_detected)
@@ -301,7 +289,7 @@ def main() -> int:
             snapshot.ppg_active = acquisition.ppg_ready
             snapshot.backend_enabled = cfg.backend.enabled
             snapshot.backend_ok = publisher.status.connected
-            snapshot.backend_pending = publisher.status.pending_batches
+            snapshot.backend_pending = publisher.status.pending_readings
             snapshot.uptime_s = time.time() - started_at
 
             if recording:

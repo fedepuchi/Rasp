@@ -6,7 +6,8 @@ Monitor de cabecera hecho con **MAX30102** (SpO2 y pulso), **AD8232** (ECG) y
 1. **Muestra** en la pantalla del Pi un monitor de paciente a pantalla completa:
    ECG con papel milimetrado, pletismografia, respiracion, numeros grandes y
    alarmas.
-2. **Manda** todo en JSON por HTTP a un backend en la misma red WiFi.
+2. **Publica** los signos vitales en JSON por **MQTT sobre TLS** al backend de
+   SIAPPC. El contrato esta en [JSON.md](JSON.md).
 
 En pantalla **solo aparece lo que estos tres modulos pueden medir**. Cada caja
 del panel numerico lleva escrito de que sensor sale, y lo que es una estimacion
@@ -77,7 +78,7 @@ Un par de aclaraciones sobre precision, para que nadie lea de mas:
 Anda en Windows, Mac o Linux, con seniales simuladas:
 
 ```bash
-pip install pygame requests
+pip install pygame paho-mqtt
 python main.py --demo --windowed
 ```
 
@@ -183,7 +184,7 @@ pip install -r requirements.txt
 
 ```bash
 python main.py                                    # pantalla completa, con hardware
-python main.py --backend http://192.168.0.50:8000 # apuntando al backend
+python main.py --broker 192.168.0.50               # apuntando al broker
 python main.py --no-backend                       # solo pantalla
 python main.py --demo --windowed                  # sin sensores
 python main.py --notch 60                         # zona de 60 Hz
@@ -305,7 +306,7 @@ Lo que mas se suele tocar:
 
 | Donde | Que |
 |---|---|
-| `backend.url` | IP y puerto del servidor |
+| `backend.host` / `port` | broker MQTT (o `MQTT_HOST` en el `.env`) |
 | `ecg.notch_hz` | 50 en Argentina/Europa, 60 en Norteamerica |
 | `ecg.sample_rate_hz` | 250 por defecto. El ADS1115 llega a 860 |
 | `ecg.frontend_gain` | ganancia del modulo AD8232 (tipico 1100) |
@@ -319,21 +320,28 @@ Lo que mas se suele tocar:
 
 ## Que manda al backend
 
-El contrato completo esta en **[JSON.md](JSON.md)**. Resumen:
+Va por **MQTT sobre TLS**, no por HTTP. El contrato completo esta en
+**[JSON.md](JSON.md)**. Resumen:
 
-- Un solo endpoint: `POST /api/v1/ingest`
-- Un mensaje `vitals` por segundo con todos los numeros y las alarmas
-- Cuatro mensajes `waveform` por segundo con las muestras de ECG, pleth y resp
-- `session_start` al arrancar y `session_end` al cerrar
-- Si se cae la WiFi, encola hasta ~2 minutos y reenvia cuando vuelve
+- Tema `siappc/<device>/telemetry`, **una lectura suelta por mensaje**, QoS 1
+- Cinco variables: `hr`, `spo2`, `pr`, `perfusion`, `resp`
+- Cada lectura lleva un **hash SHA-256** que el backend usa para deduplicar
+- Tema `siappc/<device>/status` retenido, con Last Will si el Pi desaparece
+- Si se cae la red, encola en SQLite (hasta un dia) y reenvia al reconectar
+- **Las ondas no se publican**: el backend guarda una fila por lectura y el ECG
+  son 250 muestras por segundo. Se dibujan en pantalla y ahi se quedan
 
-Para verlo funcionando sin escribir el backend todavia:
+Configuracion del broker: copia `.env.example` a `.env` y ajusta. Dentro de
+SIAPPC (en `iot/monitor/`) no hace falta: se lee `iot/.env`.
+
+Para ver que sale la telemetria sin levantar el backend:
 
 ```bash
-python tools/receptor_prueba.py --port 8000 --guardar datos.jsonl
+python tools/receptor_prueba.py --host 192.168.0.100
 ```
 
-Te imprime la IP a la que tenes que apuntar el Pi.
+Se suscribe a los mismos temas que el backend y **valida cada payload con las
+mismas reglas**, asi que avisa si algo se iba a rechazar.
 
 ---
 
@@ -439,9 +447,11 @@ Baja `ui.fps` a 30, o `ecg.sample_rate_hz` a 128. Un Pi 4 con HDMI 1080p tiene
 que ir a 60 sin despeinarse.
 
 **`SIN SERVIDOR` en el pie**
-El Pi no llega al backend. Verifica que el servidor escuche en `0.0.0.0` y no
-en `127.0.0.1`, que el firewall deje pasar el puerto, y proba desde el Pi con
-`curl -v http://IP:PUERTO/api/v1/ingest -d '{}'`.
+El Pi no llega al broker. Las lecturas no se pierden: se acumulan en la cola
+local y salen al reconectar. Revisa que `MQTT_HOST` apunte a la maquina del
+Compose, que el puerto 8883 este abierto, y que el `ca.crt` sea el del broker.
+Si el broker se alcanza por IP, esa IP tiene que estar en el certificado como
+SAN o el Pi lo rechaza a proposito.
 
 ---
 
@@ -449,6 +459,7 @@ en `127.0.0.1`, que el firewall deje pasar el puerto, y proba desde el Pi con
 
 ```
 config.py           toda la configuracion, en un solo lugar
+iot_env.py          broker y credenciales (del entorno o de iot/.env)
 main.py             arma todo y corre el bucle principal
 state.py            la foto del estado que comparten UI, alarmas y red
 alarms.py           limites, antirrebote, prioridades y silencio
@@ -465,7 +476,8 @@ processing/
   ppg.py            SpO2, pulso, perfusion y respiracion
 
 net/
-  publisher.py      armado del JSON, lotes, reintentos y buffer offline
+  publisher.py      publicacion MQTT, con reintento y cola local
+  buffer.py         cola en SQLite de lecturas sin confirmar
 
 ui/
   monitor.py        pantalla: barrido de ondas, panel numerico, alarmas
@@ -476,7 +488,7 @@ sensors/buzzer.py     buzzer pasivo por PWM (esta aca porque es hardware)
 
 tools/
   diagnostico.py      prueba cada modulo por separado, sin abrir ventana
-  receptor_prueba.py  servidor minimo para ver que llega el JSON
+  receptor_prueba.py  se suscribe al broker y valida lo que publica el Pi
 ```
 
 El bucle principal es de un solo hilo: los sensores producen en hilos aparte y

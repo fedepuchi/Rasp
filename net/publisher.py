@@ -1,417 +1,395 @@
-"""Envio de los datos al backend en formato JSON.
+"""Publicacion de los signos vitales por MQTT hacia el backend de SIAPPC.
 
-Diseno:
+Antes esto armaba un sobre `monitor.v1` y lo mandaba por HTTP a
+`POST /api/v1/ingest`. Ese endpoint no existe en SIAPPC: la telemetria que llega
+a la base entra por MQTT, en `siappc/<dispositivo>/telemetry`, y la consume
+`backend/src/services/mqttIngest.ts`. El contrato esta en JSON.md.
 
-  * El bucle principal solo encola. Nunca hace red, asi que una WiFi lenta no
-    baja los FPS del monitor.
-  * Un hilo aparte arma lotes y hace POST. Si el backend no contesta, los lotes
-    quedan en un buffer acotado (se descartan los mas viejos) y se reintenta
-    con backoff exponencial.
-  * Todo mensaje lleva device_id, session_id, seq y timestamp, asi el backend
-    puede detectar huecos y reordenar.
+Diseno (el mismo de antes, con otro transporte):
 
-El contrato completo esta documentado en JSON.md.
+  * El bucle principal solo encola: escribe la lectura en SQLite y sigue. Nunca
+    toca la red, asi que una WiFi lenta no baja los FPS del monitor.
+  * Un hilo aparte vacia la cola contra el broker, y una lectura solo se borra
+    cuando el broker confirma la entrega (PUBACK de QoS 1).
+  * Si el broker no esta, las lecturas se acumulan en el buffer y salen al
+    reconectar. El buffer tira las mas viejas antes que las recientes.
+
+Lo que **no** se publica:
+
+  * **Las ondas** (ECG, pleth, resp). El backend guarda una fila por lectura en
+    la tabla `lectura`, y el ECG son 250 muestras por segundo: no entra en ese
+    modelo. Graficar la onda necesita su propia tabla y su propio tema MQTT.
+    Mientras tanto las muestras se dibujan en pantalla y ahi se quedan.
+  * **Las alarmas, la calidad de senial y el diagnostico del equipo.** El
+    payload es una lectura suelta y no tiene donde meterlos. Las alarmas
+    clinicas las vuelve a evaluar el backend sobre `hr`, `spo2`, `pr` y `resp`
+    (`evaluateAlert` en mqttIngest.ts); las de pantalla siguen sonando aca.
 """
 
 from __future__ import annotations
 
-import gzip
+import hashlib
 import json
+import ssl
 import threading
 import time
-import uuid
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Any
-
-from config import BackendConfig, Config
+from dataclasses import dataclass
+from pathlib import Path
 
 try:
-    import requests
-except ImportError:  # pragma: no cover
-    requests = None
+    import paho.mqtt.client as mqtt
+except ImportError:  # pragma: no cover - en la PC de desarrollo puede no estar
+    mqtt = None
 
-import urllib.error
-import urllib.request
+import iot_env
+from config import BackendConfig, Config
+
+from .buffer import Buffer
+
+# Que se publica de cada foto del estado: (variable, campo de vitals_json, unidad).
+#
+# `variable` es lo que el backend guarda en `sensor.variable_medida`. No es un
+# enum cerrado, pero estos nombres tienen que ser exactamente estos: son los que
+# ya usa `iot/src/main.py` y sobre los que mqttIngest.ts evalua las alertas.
+#
+# Se lee de `vitals_json()` y no de los atributos crudos para publicar los
+# mismos numeros que muestra la pantalla, con el mismo redondeo.
+VARIABLES = (
+    ("hr", "hr_bpm", "bpm"),
+    ("spo2", "spo2_pct", "%"),
+    ("pr", "pr_bpm", "bpm"),
+    ("perfusion", "perfusion_index", "%"),
+    # OJO: estimada de como la respiracion mueve la linea de base del pleth, no
+    # medida con un sensor de flujo ni de impedancia. En pantalla va rotulada
+    # como ESTIMADA; en el payload no hay donde decirlo, asi que queda escrito
+    # en JSON.md y el backend le pone severidad "alta" como techo, nunca
+    # "critica".
+    ("resp", "resp_rpm_estimated", "rpm"),
+)
 
 
-SCHEMA = "monitor.v1"
+def reading_hash(device: str, variable: str, timestamp: float, value: float) -> str:
+    """Identidad de una lectura.
+
+    Misma construccion que `iot/src/publisher.py:reading_hash`, a proposito: el
+    backend tiene un indice unico sobre esta columna, asi que un reenvio tras
+    una caida (o un duplicado de QoS 1) choca contra el indice y se descarta en
+    vez de contarse dos veces. Si cambia alla, cambia aca.
+    """
+    raw = f"{device}|{variable}|{timestamp:.3f}|{value:.4f}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def iso_utc(epoch: float) -> str:
-    """Timestamp ISO-8601 en UTC con milisegundos, que es lo que espera casi
-    cualquier backend (JS lo parsea directo con new Date(...))."""
-    base = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(epoch))
-    return f"{base}.{int((epoch % 1) * 1000):03d}Z"
+def build_payload(device: str, timestamp: float, variable: str,
+                  value: float, unit: str) -> dict:
+    """La forma exacta que valida `telemetrySchema` en mqttIngest.ts."""
+    return {
+        "device": device,
+        "variable": variable,
+        "value": value,
+        "unit": unit,
+        "ts": timestamp,
+        "hash": reading_hash(device, variable, timestamp, value),
+    }
 
 
 @dataclass
 class PublisherStatus:
     enabled: bool = False
     connected: bool = False
-    pending_batches: int = 0
+    # Lecturas en la cola local esperando que el broker las confirme.
+    pending_readings: int = 0
     sent_ok: int = 0
     failed: int = 0
     dropped: int = 0
     last_error: str | None = None
     last_success_t: float = 0.0
-    last_latency_ms: float | None = None
-
-
-@dataclass
-class _Channel:
-    """Acumulador de una onda hasta que toca mandarla."""
-
-    name: str
-    unit: str
-    fs_hz: float
-    scale: float
-    decimation: int = 1
-    note: str = ""
-    samples: list[int] = field(default_factory=list)
-    t0: float | None = None
-    _phase: int = 0
-
-    def add(self, values: list[float], t0: float) -> None:
-        if not values:
-            return
-        if self.t0 is None:
-            self.t0 = t0
-        inv = 1.0 / self.scale
-        if self.decimation <= 1:
-            self.samples.extend(int(round(v * inv)) for v in values)
-            return
-        for value in values:
-            if self._phase == 0:
-                self.samples.append(int(round(value * inv)))
-            self._phase = (self._phase + 1) % self.decimation
-
-    def flush(self) -> dict[str, Any] | None:
-        if not self.samples or self.t0 is None:
-            return None
-        message = {
-            "name": self.name,
-            "unit": self.unit,
-            "fs_hz": round(self.fs_hz / self.decimation, 3),
-            "scale": self.scale,
-            "t0": iso_utc(self.t0),
-            "t0_ms": int(self.t0 * 1000),
-            "n": len(self.samples),
-            "samples": self.samples,
-        }
-        self.samples = []
-        self.t0 = None
-        return message
 
 
 class Publisher:
     def __init__(self, cfg: Config):
         self.cfg: BackendConfig = cfg.backend
-        self.device = cfg.device
         self.full_cfg = cfg
-        self.session_id = uuid.uuid4().hex
+        self.device = cfg.device.device_id
+        self.telemetry_topic = iot_env.telemetry_topic(self.device)
+        self.status_topic = iot_env.status_topic(self.device)
         self.status = PublisherStatus(enabled=self.cfg.enabled)
 
-        self._seq = 0
-        self._seq_lock = threading.Lock()
-        self._outbox: deque[list[dict]] = deque(maxlen=self.cfg.offline_buffer_batches)
-        self._outbox_lock = threading.Lock()
+        self._buffer: Buffer | None = None
+        self._client = None
+        # Protege el buffer: el bucle principal escribe y el hilo de red borra.
+        self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._started_at = time.time()
-
-        self._pending_messages: list[dict] = []
-        self._channels: dict[str, _Channel] = {}
         self._last_vitals_at = 0.0
-        self._last_wave_at = 0.0
-
-        self._session = None
-        if requests is not None:
-            self._session = requests.Session()
-            self._session.headers.update(self._headers())
-
-    # -- configuracion -----------------------------------------------------
 
     @property
-    def endpoint(self) -> str:
-        return self.cfg.url.rstrip("/") + self.cfg.ingest_path
+    def destination(self) -> str:
+        """Para imprimirlo al arrancar, como antes se imprimia la URL."""
+        scheme = "mqtts" if iot_env.MQTT_TLS else "mqtt"
+        return f"{scheme}://{self.cfg.host}:{self.cfg.port}/{self.telemetry_topic}"
 
-    def _headers(self) -> dict[str, str]:
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": f"monitor-vital/1.0 ({self.device.device_id})",
-        }
-        if self.cfg.api_key:
-            headers["X-API-Key"] = self.cfg.api_key
-        return headers
+    # -- conexion ----------------------------------------------------------
 
-    def register_channel(self, name: str, unit: str, fs_hz: float, scale: float,
-                         decimation: int = 1, note: str = "") -> None:
-        self._channels[name] = _Channel(name, unit, fs_hz, scale,
-                                        max(1, decimation), note)
+    def _build_client(self):
+        client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            # Sufijo `-monitor`: dentro de SIAPPC, `iot/src/` se conecta con el
+            # DEVICE_CODE pelado, y dos clientes con el mismo id se echan uno al
+            # otro del broker.
+            client_id=f"{self.device}-monitor",
+            # clean_session=False: el broker guarda los QoS 1 en vuelo si el Pi
+            # se desconecta un momento.
+            clean_session=False,
+        )
 
-    # -- entrada de datos --------------------------------------------------
+        if iot_env.MQTT_USER:
+            client.username_pw_set(iot_env.MQTT_USER, iot_env.MQTT_PASSWORD)
 
-    def add_samples(self, channel: str, values: list[float], t0: float) -> None:
-        ch = self._channels.get(channel)
-        if ch is not None and self.cfg.enabled:
-            ch.add(values, t0)
+        if iot_env.MQTT_TLS:
+            self._enable_tls(client)
 
-    def tick(self, snapshot, alarm_manager) -> None:
-        """Llamar una vez por frame: decide que mensajes toca emitir."""
-        if not self.cfg.enabled:
-            return
-        now = time.monotonic()
+        # Last Will: si el Pi desaparece sin avisar, el broker publica esto por
+        # el y el tablero puede marcar el equipo como caido.
+        client.will_set(self.status_topic, self._status_message("offline"),
+                        qos=1, retain=True)
 
-        if now - self._last_vitals_at >= self.cfg.vitals_interval_s:
-            self._last_vitals_at = now
-            self._emit(self._vitals_message(snapshot, alarm_manager))
+        client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
+        return client
 
-        if now - self._last_wave_at >= self.cfg.waveform_interval_s:
-            self._last_wave_at = now
-            waveforms = [w for w in (ch.flush() for ch in self._channels.values()) if w]
-            if waveforms:
-                self._emit(self._envelope("waveform", {"waveforms": waveforms}))
+    def _enable_tls(self, client) -> None:
+        """Cifra la conexion y valida quien esta del otro lado.
 
-    # -- construccion de mensajes -----------------------------------------
-
-    def _next_seq(self) -> int:
-        with self._seq_lock:
-            self._seq += 1
-            return self._seq
-
-    def _envelope(self, msg_type: str, payload: dict) -> dict:
-        now = time.time()
-        return {
-            "schema": SCHEMA,
-            "type": msg_type,
-            "device_id": self.device.device_id,
-            "session_id": self.session_id,
-            "seq": self._next_seq(),
-            "ts": iso_utc(now),
-            "ts_ms": int(now * 1000),
-            "uptime_s": round(now - self._started_at, 3),
-            **payload,
-        }
-
-    def _vitals_message(self, snapshot, alarm_manager) -> dict:
-        limits = self.full_cfg.alarms
-        return self._envelope("vitals", {
-            "patient": {
-                "id": self.device.patient_id,
-                "name": self.device.patient_name,
-                "bed": self.device.bed,
-            },
-            "vitals": snapshot.vitals_json(),
-            "quality": snapshot.quality_json(),
-            # Salud del equipo, aparte de los signos vitales a proposito
-            "diagnostics": snapshot.diagnostics_json(),
-            "alarms": alarm_manager.to_json(),
-            "alarms_muted": alarm_manager.muted,
-            "limits": {
-                "hr_bpm": [limits.hr_low, limits.hr_high],
-                "spo2_pct": [limits.spo2_low, 100],
-                "resp_rpm": [limits.resp_low, limits.resp_high],
-            },
-        })
-
-    def session_start(self, extra: dict | None = None) -> None:
-        if not self.cfg.enabled:
-            return
-        channels = [
-            {"name": ch.name, "unit": ch.unit,
-             "fs_hz": round(ch.fs_hz / ch.decimation, 3), "scale": ch.scale,
-             "note": ch.note}
-            for ch in self._channels.values()
-        ]
-        self._emit(self._envelope("session_start", {
-            "patient": {
-                "id": self.device.patient_id,
-                "name": self.device.patient_name,
-                "bed": self.device.bed,
-            },
-            "sensors": {
-                "ecg": {"frontend": "AD8232", "adc": "ADS1115",
-                        "lead": self.full_cfg.ecg.lead_label,
-                        "fs_hz": self.full_cfg.ecg.sample_rate_hz,
-                        "gain_nominal": self.full_cfg.ecg.frontend_gain,
-                        "calibrated": False},
-                "spo2": {"sensor": "MAX30102",
-                         "fs_hz": self.full_cfg.ppg.sample_rate_hz / self.full_cfg.ppg.averaging,
-                         "calibrated": False},
-            },
-            "channels": channels,
-            # De donde sale cada numero, declarado por el propio equipo. Sirve
-            # para que nadie le atribuya al monitor algo que no puede medir.
-            "measures": {
-                "hr_bpm": "AD8232 -> ADS1115 (intervalos R-R)",
-                "rr_last_ms": "AD8232 -> ADS1115",
-                "hrv_rmssd_ms": "AD8232 -> ADS1115 (corto plazo, ~30 latidos)",
-                "spo2_pct": "MAX30102 (curva empirica generica, sin calibrar)",
-                "pr_bpm": "MAX30102",
-                "perfusion_index": "MAX30102",
-                "resp_rpm_estimated": "estimado del pleth del MAX30102, NO medido",
-            },
-            "not_measured": [
-                "temperatura corporal",
-                "presion arterial",
-                "capnografia",
-                "respiracion por impedancia o flujo",
-            ],
-            "demo": self.full_cfg.demo,
-            **(extra or {}),
-        }), urgent=True)
-
-    def session_end(self, reason: str = "shutdown") -> None:
-        if not self.cfg.enabled:
-            return
-        self._emit(self._envelope("session_end", {"reason": reason}), urgent=True)
-        self._flush_pending()
-
-    def measurement(self, summary, index: int) -> None:
-        """Resumen de una medicion a demanda. Se manda apenas termina.
-
-        Es el mensaje mas util del contrato para guardar historial: una fila
-        por medicion, en vez de un caudal continuo de vitals.
+        La CA se comprueba aca y no en `tls_set` para dar un mensaje claro: el
+        error de paho cuando el archivo no existe no dice cual falta.
         """
-        if not self.cfg.enabled:
+        if not Path(iot_env.MQTT_CA_FILE).is_file():
+            raise SystemExit(
+                f"[mqtt] no se encuentra la CA del broker en {iot_env.MQTT_CA_FILE}.\n"
+                "        Copiala desde infra/mosquitto/certs/ca.crt (la genera\n"
+                "        infra/mosquitto/gen-certs.sh) o apunta MQTT_CA_FILE al\n"
+                "        archivo correcto. Si el broker no usa TLS, MQTT_TLS=false."
+            )
+
+        client.tls_set(
+            ca_certs=iot_env.MQTT_CA_FILE,
+            certfile=iot_env.MQTT_CLIENT_CERT_FILE,
+            keyfile=iot_env.MQTT_CLIENT_KEY_FILE,
+            cert_reqs=ssl.CERT_REQUIRED,
+            tls_version=ssl.PROTOCOL_TLS_CLIENT,
+        )
+        # Nada de tls_insecure_set(True): el nombre del certificado tiene que
+        # coincidir con el host. Si el broker se alcanza por IP, esa IP va como
+        # SAN al emitir el certificado, no se desactiva la validacion.
+
+    def _status_message(self, state: str) -> str:
+        return json.dumps({"device": self.device, "status": state})
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code != 0:
+            self.status.connected = False
+            self.status.last_error = f"conexion rechazada: {reason_code}"
+            print(f"[mqtt] conexion rechazada: {reason_code}")
             return
-        self._emit(self._envelope("measurement", {
-            "patient": {
-                "id": self.device.patient_id,
-                "name": self.device.patient_name,
-                "bed": self.device.bed,
-            },
-            "index": index,
-            "summary": summary.to_json(),
-        }), urgent=True)
 
-    def event(self, name: str, detail: dict | None = None) -> None:
-        """Evento suelto (por ejemplo: se cambiaron los limites de alarma)."""
-        if not self.cfg.enabled:
-            return
-        self._emit(self._envelope("event", {"event": name, "detail": detail or {}}))
-
-    # -- cola y envio ------------------------------------------------------
-
-    def _emit(self, message: dict, urgent: bool = False) -> None:
-        self._pending_messages.append(message)
-        if urgent or len(self._pending_messages) >= self.cfg.batch_max_messages:
-            self._flush_pending()
-
-    def _flush_pending(self) -> None:
-        if not self._pending_messages:
-            return
-        batch = self._pending_messages
-        self._pending_messages = []
-        with self._outbox_lock:
-            if len(self._outbox) == self._outbox.maxlen:
-                self.status.dropped += 1
-            self._outbox.append(batch)
-            self.status.pending_batches = len(self._outbox)
+        self.status.connected = True
+        self.status.last_error = None
+        print(f"[mqtt] conectado a {self.destination}")
+        client.publish(self.status_topic, self._status_message("online"),
+                       qos=1, retain=True)
+        # El vaciado lo hace el hilo de red, no este callback: `wait_for_publish`
+        # bloquearia el bucle interno de paho.
         self._wake.set()
+
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
+        # paho reintenta solo mientras loop_start siga vivo; aca solo se deja
+        # constancia para que la pantalla lo muestre.
+        self.status.connected = False
+        print(f"[mqtt] desconectado ({reason_code}), reintentando...")
+
+    # -- ciclo de vida -----------------------------------------------------
 
     def start(self) -> None:
         if not self.cfg.enabled:
             return
-        self._thread = threading.Thread(target=self._run, name="publisher", daemon=True)
+
+        if mqtt is None:
+            self.cfg.enabled = False
+            self.status.enabled = False
+            self.status.last_error = "paho-mqtt no esta instalado"
+            print("[mqtt] paho-mqtt no esta instalado, no se publica nada.\n"
+                  "       pip install paho-mqtt")
+            return
+
+        if iot_env.env_file_missing():
+            print(
+                f"[mqtt] aviso: no hay {iot_env.env_file_path()}, asi que el broker,\n"
+                "       el usuario y la CA son los valores por defecto. Copia el\n"
+                "       .env.example (y el ca.crt), o arranca con --no-backend si\n"
+                "       solo queres la pantalla."
+            )
+
+        self._buffer = Buffer(self.cfg.buffer_path, self.cfg.buffer_max_rows)
+        self.status.pending_readings = self._buffer.count()
+
+        self._client = self._build_client()
+        # connect_async + loop_start no bloquean: el monitor arranca aunque el
+        # broker este caido, y las lecturas se van al buffer.
+        self._client.connect_async(self.cfg.host, self.cfg.port, keepalive=30)
+        self._client.loop_start()
+
+        self._thread = threading.Thread(target=self._run, name="publisher-mqtt",
+                                        daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float = 3.0) -> None:
-        self._flush_pending()
+    # Mas que los 5 s que puede tardar un `wait_for_publish`: si no, el join
+    # vence justo mientras el hilo de red esta esperando el PUBACK del ultimo
+    # mensaje.
+    def stop(self, timeout: float = 6.0) -> None:
+        if not self.cfg.enabled or self._client is None:
+            return
+
         self._stop.set()
         self._wake.set()
-        if self._thread is not None and self._thread.is_alive():
+        if self._thread is not None:
             self._thread.join(timeout=timeout)
-        if self._session is not None:
+
+        # El tema de estado no toca el buffer, asi que se publica siempre: es
+        # como el tablero se entera de que este equipo se apago a proposito.
+        if self._client.is_connected():
+            info = self._client.publish(self.status_topic,
+                                        self._status_message("offline"),
+                                        qos=1, retain=True)
             try:
-                self._session.close()
-            except Exception:
+                info.wait_for_publish(timeout=2)
+            except (ValueError, RuntimeError):
                 pass
 
-    def _run(self) -> None:
-        backoff = self.cfg.retry_base_s
-        while not self._stop.is_set():
-            with self._outbox_lock:
-                batch = self._outbox[0] if self._outbox else None
-            if batch is None:
-                self._wake.wait(timeout=0.5)
-                self._wake.clear()
+        self._client.loop_stop()
+        try:
+            self._client.disconnect()
+        except Exception:
+            pass
+
+        # El buffer solo se cierra si el hilo de red ya termino. Si sigue vivo
+        # lo esta usando, y cerrarlo desde aca le dejaria la base en la mano.
+        worker_alive = self._thread is not None and self._thread.is_alive()
+        if not worker_alive and self._buffer is not None:
+            self._buffer.close()
+
+    # -- entrada de datos --------------------------------------------------
+
+    def tick(self, snapshot, alarm_manager=None) -> None:
+        """Llamar una vez por frame: encola una tanda si toca.
+
+        `alarm_manager` se acepta y se ignora: el payload de SIAPPC es una
+        lectura suelta y no tiene donde llevar alarmas. Las clinicas las vuelve
+        a evaluar el backend.
+        """
+        if not self.cfg.enabled or self._buffer is None:
+            return
+
+        now = time.monotonic()
+        if now - self._last_vitals_at < self.cfg.vitals_interval_s:
+            return
+        self._last_vitals_at = now
+        self.publish_vitals(snapshot)
+
+    def publish_vitals(self, snapshot) -> None:
+        """Una fila en `lectura` por cada signo vital que tenga valor."""
+        if not self.cfg.enabled or self._buffer is None:
+            return
+
+        vitals = snapshot.vitals_json()
+        # El mismo instante para toda la tanda: asi las cinco lecturas quedan
+        # alineadas en la base y se pueden graficar juntas.
+        timestamp = time.time()
+
+        encoladas = 0
+        for variable, campo, unit in VARIABLES:
+            value = vitals.get(campo)
+            if value is None:
+                # Un `null` no es un cero: significa que no se pudo medir. No se
+                # publica, y en la base simplemente no hay fila para ese
+                # instante.
                 continue
+            payload = build_payload(self.device, timestamp, variable,
+                                    float(value), unit)
+            with self._lock:
+                self._buffer.add(json.dumps(payload), payload["hash"])
+            encoladas += 1
 
-            started = time.monotonic()
-            ok, error = self._post(batch)
-            latency_ms = (time.monotonic() - started) * 1000.0
+        if encoladas:
+            with self._lock:
+                self.status.pending_readings = self._buffer.count()
+            self._wake.set()
 
-            if ok:
-                with self._outbox_lock:
-                    if self._outbox and self._outbox[0] is batch:
-                        self._outbox.popleft()
-                    self.status.pending_batches = len(self._outbox)
-                self.status.sent_ok += 1
-                self.status.connected = True
-                self.status.last_error = None
-                self.status.last_success_t = time.time()
-                self.status.last_latency_ms = round(latency_ms, 1)
-                backoff = self.cfg.retry_base_s
-            else:
+    # -- hilo de red -------------------------------------------------------
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait(timeout=1.0)
+            self._wake.clear()
+            if self._client is None or not self._client.is_connected():
+                continue
+            self._flush()
+
+    def _flush(self) -> None:
+        if self._buffer is None:
+            return
+        with self._lock:
+            pendientes = list(self._buffer.pending())
+
+        for row_id, payload in pendientes:
+            if self._stop.is_set():
+                return
+            info = self._client.publish(self.telemetry_topic, payload,
+                                        qos=self.cfg.qos)
+            # wait_for_publish confirma el PUBACK del broker. Sin esto se
+            # borraria del buffer algo que quiza nunca llego.
+            try:
+                info.wait_for_publish(timeout=5)
+            except (ValueError, RuntimeError) as exc:
                 self.status.failed += 1
-                self.status.connected = False
-                self.status.last_error = error
-                # No se descarta el lote: se reintenta hasta que el buffer se llene
-                self._stop.wait(timeout=backoff)
-                backoff = min(self.cfg.retry_max_s, backoff * 2)
+                self.status.last_error = str(exc)[:110]
+                return
+            if not info.is_published():
+                self.status.failed += 1
+                return
 
-    def _post(self, batch: list[dict]) -> tuple[bool, str | None]:
-        envelope = {
-            "schema": SCHEMA,
-            "device_id": self.device.device_id,
-            "session_id": self.session_id,
-            "sent_at": iso_utc(time.time()),
-            "messages": batch,
-        }
-        try:
-            body = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
-        except (TypeError, ValueError) as exc:
-            return False, f"JSON invalido: {exc}"
+            with self._lock:
+                self._buffer.drop(row_id)
+            self.status.sent_ok += 1
+            self.status.last_success_t = time.time()
 
-        headers = self._headers()
-        if 0 < self.cfg.gzip_over_bytes <= len(body):
-            body = gzip.compress(body, compresslevel=6)
-            headers["Content-Encoding"] = "gzip"
+        with self._lock:
+            self.status.pending_readings = self._buffer.count()
 
-        if self._session is not None:
-            return self._post_requests(body, headers)
-        return self._post_urllib(body, headers)
+    # -- compatibilidad con el contrato HTTP viejo -------------------------
+    #
+    # main.py llamaba a esto cuando el transporte era HTTP. Se dejan como no-op
+    # para que el bucle principal no tenga que preguntar por el transporte, y
+    # documentadas para que quede claro por que no hacen nada.
 
-    def _post_requests(self, body: bytes, headers: dict) -> tuple[bool, str | None]:
-        try:
-            response = self._session.post(
-                self.endpoint, data=body, headers=headers,
-                timeout=self.cfg.timeout_s, verify=self.cfg.verify_tls,
-            )
-        except requests.RequestException as exc:
-            return False, _short(exc)
-        if 200 <= response.status_code < 300:
-            return True, None
-        return False, f"HTTP {response.status_code}: {response.text[:120]}"
+    def register_channel(self, *args, **kwargs) -> None:
+        """Las ondas no se publican: no entran en la tabla `lectura`."""
 
-    def _post_urllib(self, body: bytes, headers: dict) -> tuple[bool, str | None]:
-        request = urllib.request.Request(
-            self.endpoint, data=body, headers=headers, method="POST"
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.cfg.timeout_s) as resp:
-                if 200 <= resp.status < 300:
-                    return True, None
-                return False, f"HTTP {resp.status}"
-        except urllib.error.HTTPError as exc:
-            return False, f"HTTP {exc.code}"
-        except (urllib.error.URLError, OSError) as exc:
-            return False, _short(exc)
+    def add_samples(self, *args, **kwargs) -> None:
+        """Idem: las muestras de onda se dibujan y ahi se quedan."""
 
+    def session_start(self, extra: dict | None = None) -> None:
+        """El equivalente en MQTT es el mensaje `status` retenido, y lo publica
+        `_on_connect` cuando el broker acepta la conexion."""
 
-def _short(exc: Exception) -> str:
-    text = str(exc) or exc.__class__.__name__
-    return text[:110]
+    def session_end(self, reason: str = "shutdown") -> None:
+        """Idem: lo publica `stop()` como `status: offline`."""
+
+    def measurement(self, summary, index: int) -> None:
+        """El resumen de una medicion no tiene forma en este contrato.
+
+        `lectura` guarda un valor por fila y por instante, no promedios con
+        minimo y maximo. Los valores de la ventana ya se publicaron uno por uno
+        mientras se media, asi que el resumen se puede reconstruir en la base.
+        """
