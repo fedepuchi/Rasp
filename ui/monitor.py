@@ -205,6 +205,12 @@ class MonitorUI:
         self._blink_phase = 0.0
         self.fps = 0.0
 
+        # Codigo de tecla ademas del caracter: `event.unicode` puede venir
+        # vacio segun como este arrancado SDL (en consola con kmsdrm pasa), y
+        # ahi la tecla de medir dejaria de responder sin ninguna pista.
+        self._session_keycode = getattr(
+            pygame, f"K_{cfg.session.key.lower()}", None)
+
         self._layout()
 
     # -- layout ------------------------------------------------------------
@@ -291,8 +297,7 @@ class MonitorUI:
 
     def _on_key(self, event) -> None:
         key = event.key
-        session_key = self.cfg.session.key.lower()
-        if self.session is not None and event.unicode.lower() == session_key:
+        if self.session is not None and self._is_session_key(event):
             self.session.trigger()
             return
         if key in (pygame.K_ESCAPE, pygame.K_q):
@@ -316,6 +321,13 @@ class MonitorUI:
                 trace.clear()
         elif self.demo_source is not None and self.cfg.demo:
             self._on_demo_key(key)
+
+    def _is_session_key(self, event) -> bool:
+        """Mayuscula o minuscula, y por caracter o por codigo de tecla."""
+        buscada = self.cfg.session.key.lower()
+        if event.unicode and event.unicode.lower() == buscada:
+            return True
+        return self._session_keycode is not None and event.key == self._session_keycode
 
     def _on_demo_key(self, key: int) -> None:
         """Teclas F1..F6: mueven la senial simulada para probar las alarmas."""
@@ -728,7 +740,8 @@ class MonitorUI:
         pygame.draw.rect(self.screen, PANEL_BORDER, rect, 1)
 
     def _key_hint(self) -> str:
-        return self.cfg.session.key.upper()
+        """La tecla tal como esta configurada, sin cambiarle la caja."""
+        return self.cfg.session.key
 
     def _draw_idle_screen(self) -> None:
         rect = self.waves_rect
